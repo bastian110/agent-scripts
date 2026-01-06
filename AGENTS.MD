@@ -89,6 +89,13 @@ Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 ### trash
 - Move files to Trash: `trash …` (system command).
 
+### tailscale
+- VPN mesh network for accessing remote machines (MacBook air, Iphone, rasberry pi 4).
+- Find hosts/IPs: `tailscale status`
+- SSH to machines: `ssh <hostname>` (use hostname from status output)
+- File sharing: `tailscale file cp <file> <hostname>:`, `tailscale file get`
+- Serve local ports: `tailscale serve <port>` (share dev servers)
+
 ### bin/docs-list / scripts/docs-list.ts
 - Optional. Lists `docs/` + enforces front-matter. Ignore if `bin/docs-list` not installed. Rebuild: `bun build scripts/docs-list.ts --compile --outfile bin/docs-list`.
 
