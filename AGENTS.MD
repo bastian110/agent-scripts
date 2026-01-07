@@ -7,7 +7,7 @@ Work style: telegraph; noun-phrases ok; drop grammar; min tokens.
 - Workspace: `~/projects`. Missing bastian110 repo: clone `https://github.com/steipete/<repo>.git`.
 - 3rd-party/OSS (non-bastian110): clone under `~/projects/oss`.
 - `~/Projects/manager`: private ops (domains/DNS, redirects/workers, runbooks).
-- “MacBook” / “Mac Studio” => SSH there; find hosts/IPs via `tailscale status`.
+- “MacBook” / “Rasberry” => SSH there; find hosts/IPs via `tailscale status`.
 - Files: repo or `~/Projects/agent-scripts`.
 - PRs: use `gh pr view/diff` (no URLs).
 - “Make a note” => edit AGENTS.md (shortcut; not a blocker). Ignore `CLAUDE.md`.
@@ -41,7 +41,7 @@ Work style: telegraph; noun-phrases ok; drop grammar; min tokens.
 
 ## Flow & Runtime
 - Use repo’s package manager/runtime; no swaps w/o approval.
-- Use Codex background for long jobs; tmux only for interactive/persistent (debugger/server).
+- Use Codex/Claude background for long jobs; tmux only for interactive/persistent (debugger/server).
 
 ## Build / Test
 - Before handoff: run full gate (lint/typecheck/tests/docs).
@@ -88,13 +88,6 @@ Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 
 ### trash
 - Move files to Trash: `trash …` (system command).
-
-### tailscale
-- VPN mesh network for accessing remote machines (MacBook air, Iphone, rasberry pi 4).
-- Find hosts/IPs: `tailscale status`
-- SSH to machines: `ssh <hostname>` (use hostname from status output)
-- File sharing: `tailscale file cp <file> <hostname>:`, `tailscale file get`
-- Serve local ports: `tailscale serve <port>` (share dev servers)
 
 ### bin/docs-list / scripts/docs-list.ts
 - Optional. Lists `docs/` + enforces front-matter. Ignore if `bin/docs-list` not installed. Rebuild: `bun build scripts/docs-list.ts --compile --outfile bin/docs-list`.
