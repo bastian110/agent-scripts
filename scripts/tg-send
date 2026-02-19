@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# tg-send — send a file to your Telegram phone via bot API
+# Usage: tg-send [--caption "text"] <file>
+# Requires: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars
+
+set -euo pipefail
+
+usage() {
+  printf 'Usage: %s [--caption "text"] <file>\n' "$(basename "$0")" >&2
+  printf '  TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set\n' >&2
+  exit 2
+}
+
+# --- parse args ---
+caption=""
+file=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --caption)
+      [[ $# -lt 2 ]] && { printf 'Error: --caption requires a value\n' >&2; exit 1; }
+      caption="$2"
+      shift 2
+      ;;
+    --caption=*)
+      caption="${1#--caption=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    -*)
+      printf 'Error: unknown option: %s\n' "$1" >&2
+      usage
+      ;;
+    *)
+      if [[ -n "$file" ]]; then
+        printf 'Error: only one file at a time\n' >&2
+        exit 1
+      fi
+      file="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -z "$file" ]] && usage
+
+# --- validate env ---
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  printf 'Error: TELEGRAM_BOT_TOKEN is not set\n' >&2
+  exit 1
+fi
+if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+  printf 'Error: TELEGRAM_CHAT_ID is not set\n' >&2
+  exit 1
+fi
+
+# --- validate file ---
+if [[ ! -f "$file" ]]; then
+  printf 'Error: file not found: %s\n' "$file" >&2
+  exit 1
+fi
+
+# --- send ---
+api_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+
+curl_args=(
+  --silent --show-error --fail-with-body
+  -F "chat_id=${TELEGRAM_CHAT_ID}"
+  -F "document=@${file}"
+)
+
+if [[ -n "$caption" ]]; then
+  curl_args+=(-F "caption=${caption}")
+fi
+
+printf 'Sending %s...\n' "$(basename "$file")"
+
+response=$(curl "${curl_args[@]}" "$api_url")
+
+if printf '%s' "$response" | grep -q '"ok":true'; then
+  printf 'Sent: %s\n' "$(basename "$file")"
+else
+  printf 'Error: Telegram API returned:\n%s\n' "$response" >&2
+  exit 1
+fi
