@@ -104,6 +104,11 @@ Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 - Global: `~/.codex/prompts/`. Repo-local: `docs/slash-commands/`.
 - Common: `/handoff`, `/pickup`.
 
+### tg-send (scripts/tg-send)
+- Send a file to Telegram: `tg-send [--caption "text"] <file>`.
+- Requires env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- One file at a time; uses `sendDocument` API.
+
 ### tmux
 - Use only when you need persistence/interaction (debugger/server).
 - Quick refs: `tmux new -d -s codex-shell`, `tmux attach -t codex-shell`, `tmux list-sessions`, `tmux kill-session -t codex-shell`.
