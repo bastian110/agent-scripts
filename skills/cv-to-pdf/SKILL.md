@@ -17,6 +17,21 @@ Projet source : `~/Projects/career/`.
 | Français | `cv/cv-fr.md` | `cv/cv-fr.html` | `cv/cv-fr.pdf` |
 | Anglais | `cv/cv-en.md` | `cv/cv-en.html` | `cv/cv-en.pdf` |
 
+## Langue par défaut
+
+**Français par défaut.** Toujours générer `cv-fr` sauf si l'utilisateur demande explicitement l'anglais.
+Si aucune langue n'est précisée → français.
+
+## Contrainte de pagination
+
+**Exactement 1 page A4 — ni plus, ni moins.**
+
+- Le CV doit tenir sur **une seule page**, sans déborder.
+- La page doit être **remplie** : pas de grand vide en bas. Ajuster `font-size`, `line-height`, `padding`, `margin`, espacement entre sections pour occuper tout l'espace disponible.
+- Si le contenu déborde → réduire tailles/espacements.
+- Si la page est trop vide → augmenter tailles/espacements ou ajouter du contenu pertinent depuis le `.md`.
+- Itérer le CSS jusqu'à ce que le PDF remplisse exactement 1 page A4.
+
 ## Processus
 
 ### 1. Lire le CV source
@@ -83,8 +98,10 @@ which chromium-browser || which chromium || which wkhtmltopdf || which pandoc
 ### 4. Vérifier le résultat
 
 - Ouvrir le PDF : `xdg-open cv/cv-fr.pdf`
-- Contrôler : une seule page A4, pas de coupure entre sections, texte lisible
-- Si multi-page : réduire `font-size` ou `padding` dans le CSS
+- Contrôler : **exactement 1 page A4**, contenu bien rempli, pas de coupure entre sections, texte lisible
+- Si multi-page : réduire `font-size`, `padding`, `margin` ou `line-height`
+- Si page trop vide (grand espace blanc en bas) : augmenter tailles/espacements ou enrichir le contenu
+- **Itérer** génération HTML → PDF → vérification jusqu'à obtenir 1 page pleine
 
 ### 5. Committer (si demandé)
 
@@ -95,10 +112,11 @@ committer cv/cv-fr.html cv/cv-fr.pdf
 
 ## Règles
 
+- **Langue par défaut = français** (sauf demande explicite d'anglais)
+- **1 page A4 exacte** : pleine de contenu, sans débordement
 - HTML autoportant : **zéro dépendance externe** (polices Google, CDN, etc.)
 - Ne jamais écraser le fichier `.md` source
 - PDF = A4, marges ≥ 10 mm
-- Mise en forme neutre jusqu'à validation du design final
 
 ## Erreurs courantes
 
