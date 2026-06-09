@@ -1,7 +1,22 @@
 # AGENTS.MD
 
-Start: say hi + 1 motivating line.
+Start of new conversation only: say hi + 1 motivating line. Do not greet on every reply within the same conversation/session.
 Work style: telegraph; noun-phrases ok; drop grammar; min tokens.
+
+## Telegram Notifications (always active)
+Use `tg-send` + `tg-recv` to keep Bastian informed. Never stay silent on important events.
+
+| Situation | Action |
+|---|---|
+| Tâche terminée | `tg-send "✅ [tâche]: terminé. [résumé 1 ligne]"` |
+| Bloqué / attend une décision | `tg-send "⚠️ [contexte]: [question] — A) … B) …"` puis `decision=$(tg-recv)` |
+| Erreur / problème nécessitant intervention | `tg-send "🔴 [contexte]: [erreur courte] — intervention requise"` puis `decision=$(tg-recv)` |
+| Étape longue en cours (>2 min) | `tg-send "⏳ [tâche]: [étape en cours]…"` (pas de réponse attendue) |
+
+Règles :
+- Messages courts, télégraphiques — contexte + état + action requise (si besoin).
+- **Toute interruption attendant un input de Bastian = obligatoire** : `tg-send` la question PUIS `tg-recv` pour bloquer jusqu'à sa réponse. Ne jamais continuer sans elle.
+- Ne jamais staller silencieusement. Ne jamais improviser une décision qui appartient à Bastian.
 
 ## Agent Protocol
 - Workspace: `~/projects`. Missing bastian110 repo: clone `https://github.com/steipete/<repo>.git`.
@@ -105,9 +120,24 @@ Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 - Common: `/handoff`, `/pickup`.
 
 ### tg-send (scripts/tg-send)
-- Send a file to Telegram: `tg-send [--caption "text"] <file>`.
+- Default: send text message: `tg-send "your message"`.
+- Send file/media with flag: `tg-send --file <path>`, `--photo`, `--audio`, `--video`.
+- Optional caption for media: `tg-send --photo img.png --caption "text"`.
 - Requires env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
-- One file at a time; uses `sendDocument` API.
+- One media item at a time.
+- **Interruptions**: use `tg-send` + `tg-recv` whenever a decision, question, or reflection is needed that blocks progress. Don't silently stall — send then wait. Pattern:
+  ```bash
+  tg-send "⚠️ [context]: [question] — options: A) … B) …"
+  decision=$(tg-recv)   # blocks until reply
+  # continue based on $decision
+  ```
+
+### tg-recv (scripts/tg-recv)
+- Wait for next Telegram reply: `decision=$(tg-recv)`.
+- Blocks until a message arrives from `TELEGRAM_CHAT_ID`; prints text to stdout.
+- `--timeout <seconds>`: max wait (default 300s); exits 1 on timeout.
+- Tracks offset in `/tmp/tg-recv-offset` — ignores messages sent before the call.
+- Requires env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
 ### tmux
 - Use only when you need persistence/interaction (debugger/server).
