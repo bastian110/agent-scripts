@@ -85,3 +85,56 @@ When explain me a point, be sure i understood by giving me 3 simple exercices to
 - Conflicts: call out; pick safer path.
 - Unrecognized changes: assume other agent; keep going; focus your changes. If it causes issues, stop + ask user.
 - Leave breadcrumb notes in thread.
+
+
+## Tools
+
+Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
+
+### committer
+- Commit helper (PATH). Stages only listed paths; required here. Repo may also ship `./scripts/committer`.
+
+### trash
+- Move files to Trash: `trash …` (system command).
+
+### bin/docs-list / scripts/docs-list.ts
+- Optional. Lists `docs/` + enforces front-matter. Ignore if `bin/docs-list` not installed. Rebuild: `bun build scripts/docs-list.ts --compile --outfile bin/docs-list`.
+
+### bin/browser-tools / scripts/browser-tools.ts
+- Chrome DevTools helper. Cmds: `start`, `nav`, `eval`, `screenshot`, `pick`, `cookies`, `inspect`, `kill`.
+- Rebuild: `bun build scripts/browser-tools.ts --compile --target bun --outfile bin/browser-tools`.
+
+### gh
+- GitHub CLI for PRs/CI/releases. Given issue/PR URL (or `/pull/5`): use `gh`, not web search.
+- Examples: `gh issue view <url> --comments -R owner/repo`, `gh pr view <url> --comments --files -R owner/repo`.
+
+### Skills (Claude Code)
+- Skills folder: `~/.claude/skills/`. Check before any task — invoke via `Skill` tool.
+- Per-project skills: `.claude/skills/` in repo root.
+- Always invoke relevant skill before responding; even 1% chance = invoke.
+
+### Slash Commands
+- Global: `~/.codex/prompts/`. Repo-local: `docs/slash-commands/`.
+- Common: `/handoff`, `/pickup`.
+
+### tg-send (scripts/tg-send)
+- Send a file to Telegram: `tg-send [--caption "text"] <file>`.
+- Requires env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- One file at a time; uses `sendDocument` API.
+
+### tmux
+- Use only when you need persistence/interaction (debugger/server).
+- Quick refs: `tmux new -d -s codex-shell`, `tmux attach -t codex-shell`, `tmux list-sessions`, `tmux kill-session -t codex-shell`.
+
+<frontend_aesthetics>
+Avoid “AI slop” UI. Be opinionated + distinctive.
+
+Do:
+- Typography: pick a real font; avoid Inter/Roboto/Arial/system defaults.
+- Theme: commit to a palette; use CSS vars; bold accents > timid gradients.
+- Motion: 1–2 high-impact moments (staggered reveal beats random micro-anim).
+- Background: add depth (gradients/patterns), not flat default.
+
+Avoid: purple-on-white clichés, generic component grids, predictable layouts.
+</frontend_aesthetics>
+
