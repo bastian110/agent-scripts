@@ -24,6 +24,55 @@ Before changing code, identify or ask for:
 
 If the user has not provided a spec or fixed point, ask. If validation commands are unclear, inspect the repo scripts and propose commands.
 
+## Automated fresh-context runner
+
+This skill includes a runner that can spawn a fresh Pi session for each loop step while preserving orchestration state on disk.
+
+Use it when the user wants the loop automated or wants each step to run with a fresh context:
+
+```bash
+./scripts/spec-loop start \
+  --spec <path-or-url-or-text> \
+  --base <git-ref> \
+  --validation "pnpm test" \
+  --validation "pnpm typecheck"
+```
+
+The runner is designed for a Pi parent orchestrator:
+
+- stdout is strict JSON only.
+- runs are stored in the current project under `.pi/spec-loop-runs/<project-slug>-<short-uuid>/`.
+- `.pi/spec-loop-runs/` is added to the current project's `.gitignore` automatically.
+- each loop step gets a deterministic persistent Pi session id.
+- logs and parsed child outputs are stored per step and attempt.
+- default mode is `auto`; `--mode checkpoints` stops after each successful step.
+- default timeout is 30 minutes per child Pi; use `--timeout-ms 0` to disable.
+- child Pi commands use `--approve` by default; use `--no-approve` to disable.
+
+Resume examples:
+
+```bash
+./scripts/spec-loop resume --run .pi/spec-loop-runs/<run-id> --answer "Continue."
+./scripts/spec-loop resume --run .pi/spec-loop-runs/<run-id> --step 03-review --fresh
+./scripts/spec-loop resume --run .pi/spec-loop-runs/<run-id> --step 04-fix --answer "Reject finding 2; it is out of scope."
+```
+
+The runner controls the canonical order:
+
+```txt
+01-spec-intake → 02-implementation → 03-review → 04-fix → 05-simplification → 06-final-review
+```
+
+Child Pi sessions must return JSON with one of:
+
+```json
+{"status":"completed","summary":"...","artifacts":["..."]}
+{"status":"needs_confirmation","question":"...","recommendedAnswer":"...","summary":"..."}
+{"status":"failed","reason":"...","summary":"..."}
+```
+
+If a child returns `needs_confirmation` or `failed`, the runner stops and returns a JSON object containing the run dir, current step, log path, and a resume command.
+
 ## Related skills to load
 
 When executing this loop, load these skills as needed:
