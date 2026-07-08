@@ -1,6 +1,6 @@
 ---
 name: spec-implementation-loop
-description: Implement a spec through a repeatable loop: clarify behavior, build vertical TDD slices, review against the spec, fix findings test-first, simplify the implementation safely, and run a final spec review. Use when the user wants to implement a feature/spec/issue with review-fix-review and regression-safe simplification.
+description: "Implement a spec through a repeatable loop: clarify behavior, build vertical TDD slices, review against the spec, fix findings test-first, simplify the implementation safely, and run a final spec review. Use when the user wants to implement a feature/spec/issue with review-fix-review and regression-safe simplification."
 ---
 
 # Spec Implementation Loop
