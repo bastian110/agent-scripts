@@ -91,9 +91,6 @@ When explain me a point, be sure i understood by giving me 3 simple exercices to
 
 Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 
-### committer
-- Commit helper (PATH). Stages only listed paths; required here. Repo may also ship `./scripts/committer`.
-
 ### trash
 - Move files to Trash: `trash …` (system command).
 
@@ -125,16 +122,3 @@ Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 ### tmux
 - Use only when you need persistence/interaction (debugger/server).
 - Quick refs: `tmux new -d -s codex-shell`, `tmux attach -t codex-shell`, `tmux list-sessions`, `tmux kill-session -t codex-shell`.
-
-<frontend_aesthetics>
-Avoid “AI slop” UI. Be opinionated + distinctive.
-
-Do:
-- Typography: pick a real font; avoid Inter/Roboto/Arial/system defaults.
-- Theme: commit to a palette; use CSS vars; bold accents > timid gradients.
-- Motion: 1–2 high-impact moments (staggered reveal beats random micro-anim).
-- Background: add depth (gradients/patterns), not flat default.
-
-Avoid: purple-on-white clichés, generic component grids, predictable layouts.
-</frontend_aesthetics>
-
