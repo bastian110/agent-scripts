@@ -13,6 +13,38 @@ Correctness comes first, simplification comes second.
 
 Never simplify while tests are red or while there are unresolved blocking spec findings.
 
+## Default execution mode — use the runner
+
+When the user asks to execute this skill, the default is the automated fresh-context runner.
+
+You MUST use `scripts/spec-loop` when the user:
+
+- asks to run this loop end-to-end,
+- asks to implement a spec with this skill,
+- mentions fresh context, child sessions, orchestration, or isolated steps,
+- says “run the skill” without explicitly requesting manual execution.
+
+Do not execute the phases manually in the parent session unless the user explicitly says “manual mode” or the runner is unavailable.
+
+Before implementing code, resolve the runner path relative to this skill directory and verify it exists:
+
+```bash
+<skill-dir>/scripts/spec-loop help
+```
+
+Then start the loop with the runner:
+
+```bash
+<skill-dir>/scripts/spec-loop start \
+  --spec <path-or-url-or-text> \
+  --base <git-ref> \
+  --validation "<validation command>"
+```
+
+If the runner is unavailable or fails before creating a run, stop and report that. Ask the user whether to continue in manual mode. Do not silently fall back to manual execution.
+
+The manual phases below are the fallback workflow and the conceptual contract for each child Pi step. They are not the default execution path.
+
 ## Inputs to collect
 
 Before changing code, identify or ask for:
@@ -43,7 +75,8 @@ The runner is designed for a Pi parent orchestrator:
 - stdout is strict JSON only.
 - runs are stored in the current project under `.pi/spec-loop-runs/<project-slug>-<short-uuid>/`.
 - `.pi/spec-loop-runs/` is added to the current project's `.gitignore` automatically.
-- each loop step gets a deterministic persistent Pi session id.
+- each major loop step gets a deterministic persistent Pi session id.
+- `03-review` and `04-fix` intentionally share the same `03-review-fix` Pi session so the fix step keeps the review findings and exploration in context while saving tokens.
 - logs and parsed child outputs are stored per step and attempt.
 - default mode is `auto`; `--mode checkpoints` stops after each successful step.
 - default timeout is 30 minutes per child Pi; use `--timeout-ms 0` to disable.
@@ -61,6 +94,17 @@ The runner controls the canonical order:
 
 ```txt
 01-spec-intake → 02-implementation → 03-review → 04-fix → 05-simplification → 06-final-review
+```
+
+Session grouping:
+
+```txt
+01-spec-intake    → fresh session
+02-implementation → fresh session
+03-review         → shared 03-review-fix session
+04-fix            → same 03-review-fix session
+05-simplification → fresh session
+06-final-review   → fresh session
 ```
 
 Child Pi sessions must return JSON with one of:

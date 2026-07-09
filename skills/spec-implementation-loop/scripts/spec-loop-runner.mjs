@@ -14,6 +14,14 @@ const STEPS = [
 ];
 
 const NEXT_STEP = Object.fromEntries(STEPS.map((step, index) => [step, STEPS[index + 1] ?? null]));
+const SESSION_GROUP = {
+  "01-spec-intake": "01-spec-intake",
+  "02-implementation": "02-implementation",
+  "03-review": "03-review-fix",
+  "04-fix": "03-review-fix",
+  "05-simplification": "05-simplification",
+  "06-final-review": "06-final-review",
+};
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const RUNNER_VERSION = 1;
 
@@ -101,7 +109,7 @@ function start(args) {
     steps: Object.fromEntries(STEPS.map((step) => [step, { status: "pending", attempt: 0 }])),
   };
   writeState(state);
-  return runStepAndMaybeContinue(state, STEPS[0], { continueSession: false });
+  return runStepAndMaybeContinue(state, STEPS[0]);
 }
 
 function resume(args) {
@@ -113,11 +121,9 @@ function resume(args) {
 
   const step = args.step || state.currentStep;
   if (!STEPS.includes(step)) return printJson({ status: "failed", reason: "unknown_step", step, steps: STEPS }, 2);
-  const continueSession = args.fresh ? false : true;
   return runStepAndMaybeContinue(state, step, {
     answer: args.answer,
     fresh: Boolean(args.fresh),
-    continueSession,
     forceContinue: Boolean(args.continue),
   });
 }
@@ -146,13 +152,13 @@ function runStepAndMaybeContinue(state, step, options = {}) {
     }), 0);
   }
 
-  return runStepAndMaybeContinue(state, nextStep, { continueSession: false });
+  return runStepAndMaybeContinue(state, nextStep);
 }
 
 function runOneStep(state, step, options = {}) {
   const stepState = state.steps[step] ?? { status: "pending", attempt: 0 };
   const attempt = options.fresh || stepState.attempt === 0 ? stepState.attempt + 1 : stepState.attempt;
-  const sessionId = `spec-loop-${state.runId}-${step}-a${attempt}`;
+  const sessionId = `spec-loop-${state.runId}-${SESSION_GROUP[step] ?? step}-a${attempt}`;
   const logPath = join(state.runDir, "logs", `${step}.attempt-${attempt}.log`);
   const outputPath = join(state.runDir, "outputs", `${step}.attempt-${attempt}.json`);
   const latestPath = join(state.runDir, "outputs", `${step}.latest.json`);
@@ -166,7 +172,6 @@ function runOneStep(state, step, options = {}) {
   const piArgs = [];
   if (state.approve) piArgs.push("--approve");
   piArgs.push("--session-id", sessionId);
-  if (options.continueSession && !options.fresh) piArgs.push("-c");
   piArgs.push("-p", prompt);
 
   const startedAt = new Date().toISOString();
@@ -201,14 +206,15 @@ function runOneStep(state, step, options = {}) {
 
   const normalized = normalizeChildResult(parsed);
   state.steps[step] = {
-    ...state.steps[step],
     status: normalized.status,
+    attempt,
+    sessionId,
+    logPath,
+    outputPath,
+    latestPath,
     summary: normalized.summary,
     question: normalized.question,
     recommendedAnswer: normalized.recommendedAnswer,
-    outputPath,
-    latestPath,
-    logPath,
     finishedAt,
   };
   state.status = normalized.status === "completed" ? "running" : normalized.status;
