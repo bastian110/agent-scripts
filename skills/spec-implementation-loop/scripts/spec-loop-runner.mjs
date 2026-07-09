@@ -30,6 +30,7 @@ async function main() {
   try {
     if (command === "start") return await start(parseArgs(rest));
     if (command === "resume") return await resume(parseArgs(rest));
+    if (command === "status") return status(parseArgs(rest));
     if (command === "help" || command === "--help" || !command) return help();
     return printJson({ status: "failed", reason: "unknown_command", command, usage: usage() }, 2);
   } catch (error) {
@@ -41,6 +42,7 @@ function usage() {
   return [
     "spec-loop start --spec <path|url|text> --base <git-ref> [--validation <cmd> ...] [--mode auto|checkpoints]",
     "spec-loop resume --run <run-dir> [--answer <text>] [--step <step>] [--fresh] [--continue]",
+    "spec-loop status --run <run-dir> [--log-lines <n>]", 
   ].join("\n");
 }
 
@@ -64,6 +66,7 @@ function parseArgs(argv) {
       case "--run-name": args.runName = next(); break;
       case "--timeout-ms": args.timeoutMs = Number(next()); break;
       case "--pi-bin": args.piBin = next(); break;
+      case "--log-lines": args.logLines = Number(next()); break;
       case "--run": args.run = next(); break;
       case "--answer": args.answer = next(); break;
       case "--step": args.step = next(); break;
@@ -143,6 +146,24 @@ async function resume(args) {
   });
 }
 
+function status(args) {
+  if (!args.run) return printJson({ status: "failed", reason: "missing_run", usage: usage() }, 2);
+  const state = readState(resolve(args.run));
+  const currentStep = state.currentStep;
+  const stepState = state.steps?.[currentStep];
+  const logPath = stepState?.logPath;
+  return printJson(summary(state, {
+    status: state.status,
+    currentStep,
+    stepStatus: stepState?.status,
+    attempt: stepState?.attempt,
+    sessionId: stepState?.sessionId,
+    logPath,
+    outputPath: stepState?.outputPath,
+    lastLogLines: logPath && existsSync(logPath) ? tailLines(logPath, Number.isFinite(args.logLines) ? args.logLines : 40) : [],
+  }), 0);
+}
+
 async function runStepAndMaybeContinue(state, step, options = {}) {
   const result = await runOneStep(state, step, options);
   if (result.status !== "completed") return printJson(result, result.status === "failed" ? 1 : 0);
@@ -163,7 +184,7 @@ async function runStepAndMaybeContinue(state, step, options = {}) {
       status: "checkpoint",
       completedStep: step,
       nextStep,
-      resumeCommand: resumeCommand(state, nextStep, { continueFlag: true }),
+      resumeCommand: resumeCommand(state, nextStep),
     }), 0);
   }
 
@@ -420,6 +441,11 @@ function extractJson(text) {
     }
   }
   return null;
+}
+
+function tailLines(path, count) {
+  const content = readFileSync(path, "utf8");
+  return content.split(/\r?\n/).slice(-count);
 }
 
 function readState(runDir) {

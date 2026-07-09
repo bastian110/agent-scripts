@@ -32,14 +32,17 @@ Before implementing code, resolve the runner path relative to this skill directo
 <skill-dir>/scripts/spec-loop help
 ```
 
-Then start the loop with the runner:
+For a Pi parent orchestrator, start in checkpoint mode so the parent regains control after every child step and can monitor child state:
 
 ```bash
 <skill-dir>/scripts/spec-loop start \
+  --mode checkpoints \
   --spec <path-or-url-or-text> \
   --base <git-ref> \
   --validation "<validation command>"
 ```
+
+After each checkpoint, the parent should inspect status/logs, then launch the next step with the returned `resumeCommand` or an explicit `resume --step <nextStep>` command.
 
 If the runner is unavailable or fails before creating a run, stop and report that. Ask the user whether to continue in manual mode. Do not silently fall back to manual execution.
 
@@ -60,15 +63,20 @@ If the user has not provided a spec or fixed point, ask. If validation commands 
 
 This skill includes a runner that can spawn a fresh Pi session for each loop step while preserving orchestration state on disk.
 
-Use it when the user wants the loop automated or wants each step to run with a fresh context:
+Use it when the user wants the loop automated or wants each step to run with a fresh context.
+
+For parent-orchestrated runs, prefer checkpoint mode:
 
 ```bash
 ./scripts/spec-loop start \
+  --mode checkpoints \
   --spec <path-or-url-or-text> \
   --base <git-ref> \
   --validation "pnpm test" \
   --validation "pnpm typecheck"
 ```
+
+Use `auto` only when the user explicitly wants the runner to chain all steps without parent inspection.
 
 The runner is designed for a Pi parent orchestrator:
 
@@ -80,13 +88,16 @@ The runner is designed for a Pi parent orchestrator:
 - logs are created at step start and streamed while the child Pi runs; parsed child outputs are stored per step and attempt.
 - if the runner is interrupted, it marks the current step `interrupted` when possible.
 - if `resume` sees a `running` step whose log was never created, it reports `stale` and suggests a `--fresh` resume command.
-- default mode is `auto`; `--mode checkpoints` stops after each successful step.
+- default mode is `auto`; parent orchestrators should pass `--mode checkpoints` so they can supervise each child step.
+- in checkpoint mode, each invocation runs at most one step and returns `status: "checkpoint"` with `nextStep` and `resumeCommand`.
+- use `status --run <run-dir>` to inspect current state and recent log lines while a child step is running.
 - default timeout is 30 minutes per child Pi; use `--timeout-ms 0` to disable.
 - child Pi commands use `--approve` by default; use `--no-approve` to disable.
 
-Resume examples:
+Status and resume examples:
 
 ```bash
+./scripts/spec-loop status --run .pi/spec-loop-runs/<run-id> --log-lines 80
 ./scripts/spec-loop resume --run .pi/spec-loop-runs/<run-id> --answer "Continue."
 ./scripts/spec-loop resume --run .pi/spec-loop-runs/<run-id> --step 03-review --fresh
 ./scripts/spec-loop resume --run .pi/spec-loop-runs/<run-id> --step 04-fix --answer "Reject finding 2; it is out of scope."
@@ -118,6 +129,14 @@ Child Pi sessions must return JSON with one of:
 ```
 
 If a child returns `needs_confirmation` or `failed`, the runner stops and returns a JSON object containing the run dir, current step, log path, and a resume command.
+
+A Pi parent orchestrator must not assume the runner is still progressing silently. It should periodically run:
+
+```bash
+./scripts/spec-loop status --run .pi/spec-loop-runs/<run-id>
+```
+
+and inspect `status`, `currentStep`, `stepStatus`, `logPath`, and `lastLogLines`. If status is `checkpoint`, `needs_confirmation`, `failed`, `stale`, or `interrupted`, the parent should report or ask the user before resuming.
 
 ## Related skills to load
 
