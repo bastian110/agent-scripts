@@ -77,7 +77,9 @@ The runner is designed for a Pi parent orchestrator:
 - `.pi/spec-loop-runs/` is added to the current project's `.gitignore` automatically.
 - each major loop step gets a deterministic persistent Pi session id.
 - `03-review` and `04-fix` intentionally share the same `03-review-fix` Pi session so the fix step keeps the review findings and exploration in context while saving tokens.
-- logs and parsed child outputs are stored per step and attempt.
+- logs are created at step start and streamed while the child Pi runs; parsed child outputs are stored per step and attempt.
+- if the runner is interrupted, it marks the current step `interrupted` when possible.
+- if `resume` sees a `running` step whose log was never created, it reports `stale` and suggests a `--fresh` resume command.
 - default mode is `auto`; `--mode checkpoints` stops after each successful step.
 - default timeout is 30 minutes per child Pi; use `--timeout-ms 0` to disable.
 - child Pi commands use `--approve` by default; use `--no-approve` to disable.

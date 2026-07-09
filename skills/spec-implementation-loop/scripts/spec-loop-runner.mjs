@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, appendFileSync } from "node:fs";
 import { basename, join, resolve, relative } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -25,11 +25,11 @@ const SESSION_GROUP = {
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const RUNNER_VERSION = 1;
 
-function main() {
+async function main() {
   const [command, ...rest] = process.argv.slice(2);
   try {
-    if (command === "start") return start(parseArgs(rest));
-    if (command === "resume") return resume(parseArgs(rest));
+    if (command === "start") return await start(parseArgs(rest));
+    if (command === "resume") return await resume(parseArgs(rest));
     if (command === "help" || command === "--help" || !command) return help();
     return printJson({ status: "failed", reason: "unknown_command", command, usage: usage() }, 2);
   } catch (error) {
@@ -78,7 +78,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function start(args) {
+async function start(args) {
   if (!args.spec) return printJson({ status: "failed", reason: "missing_spec", usage: usage() }, 2);
   if (!args.base) return printJson({ status: "failed", reason: "missing_base", usage: usage() }, 2);
 
@@ -109,10 +109,10 @@ function start(args) {
     steps: Object.fromEntries(STEPS.map((step) => [step, { status: "pending", attempt: 0 }])),
   };
   writeState(state);
-  return runStepAndMaybeContinue(state, STEPS[0]);
+  return await runStepAndMaybeContinue(state, STEPS[0]);
 }
 
-function resume(args) {
+async function resume(args) {
   if (!args.run) return printJson({ status: "failed", reason: "missing_run", usage: usage() }, 2);
   const state = readState(resolve(args.run));
   if (args.timeoutMs !== undefined) state.timeoutMs = args.timeoutMs;
@@ -121,15 +121,30 @@ function resume(args) {
 
   const step = args.step || state.currentStep;
   if (!STEPS.includes(step)) return printJson({ status: "failed", reason: "unknown_step", step, steps: STEPS }, 2);
-  return runStepAndMaybeContinue(state, step, {
+  const stepState = state.steps[step];
+  if (stepState?.status === "running" && !args.fresh && (!stepState.logPath || !existsSync(stepState.logPath))) {
+    state.status = "stale";
+    state.currentStep = step;
+    state.steps[step] = { ...stepState, status: "stale", reason: "running_step_has_no_log" };
+    touchState(state);
+    return printJson(summary(state, {
+      status: "stale",
+      currentStep: step,
+      reason: "running_step_has_no_log",
+      logPath: stepState.logPath,
+      resumeCommand: resumeCommand(state, step, { fresh: true }),
+    }), 1);
+  }
+
+  return await runStepAndMaybeContinue(state, step, {
     answer: args.answer,
     fresh: Boolean(args.fresh),
     forceContinue: Boolean(args.continue),
   });
 }
 
-function runStepAndMaybeContinue(state, step, options = {}) {
-  const result = runOneStep(state, step, options);
+async function runStepAndMaybeContinue(state, step, options = {}) {
+  const result = await runOneStep(state, step, options);
   if (result.status !== "completed") return printJson(result, result.status === "failed" ? 1 : 0);
 
   const nextStep = NEXT_STEP[step];
@@ -152,10 +167,10 @@ function runStepAndMaybeContinue(state, step, options = {}) {
     }), 0);
   }
 
-  return runStepAndMaybeContinue(state, nextStep);
+  return await runStepAndMaybeContinue(state, nextStep);
 }
 
-function runOneStep(state, step, options = {}) {
+async function runOneStep(state, step, options = {}) {
   const stepState = state.steps[step] ?? { status: "pending", attempt: 0 };
   const attempt = options.fresh || stepState.attempt === 0 ? stepState.attempt + 1 : stepState.attempt;
   const sessionId = `spec-loop-${state.runId}-${SESSION_GROUP[step] ?? step}-a${attempt}`;
@@ -175,28 +190,22 @@ function runOneStep(state, step, options = {}) {
   piArgs.push("-p", prompt);
 
   const startedAt = new Date().toISOString();
-  const child = spawnSync(state.piBin, piArgs, {
-    cwd: state.cwd,
-    encoding: "utf8",
-    timeout: state.timeoutMs === 0 ? undefined : state.timeoutMs,
-    maxBuffer: 50 * 1024 * 1024,
-  });
-  const finishedAt = new Date().toISOString();
-  const combinedLog = [
+  writeFileSync(logPath, [
     `# ${step} attempt ${attempt}`,
+    `status: running`,
     `startedAt: ${startedAt}`,
-    `finishedAt: ${finishedAt}`,
     `sessionId: ${sessionId}`,
     `command: ${state.piBin} ${piArgs.map(shellQuote).join(" ")}`,
     "\n## stdout\n",
-    child.stdout || "",
-    "\n## stderr\n",
-    child.stderr || "",
-  ].join("\n");
-  writeFileSync(logPath, combinedLog);
+  ].join("\n"));
 
-  if (child.error?.code === "ETIMEDOUT") return failStep(state, step, attempt, "timeout", logPath, outputPath);
+  const child = await runChildStreaming({ state, step, attempt, sessionId, logPath, outputPath, command: state.piBin, args: piArgs });
+  const finishedAt = new Date().toISOString();
+  appendFileSync(logPath, `\n\nfinishedAt: ${finishedAt}\nexitCode: ${child.status ?? "null"}\nsignal: ${child.signal ?? "null"}\n`);
+
+  if (child.timedOut) return failStep(state, step, attempt, "timeout", logPath, outputPath);
   if (child.error) return failStep(state, step, attempt, "child_error", logPath, outputPath, child.error.message);
+  if (child.interrupted) return failStep(state, step, attempt, "interrupted", logPath, outputPath, child.signal || "interrupted");
   if (child.status !== 0) return failStep(state, step, attempt, "child_exit_nonzero", logPath, outputPath, `exit ${child.status}`);
 
   const parsed = extractJson(child.stdout || "");
@@ -248,6 +257,89 @@ function failStep(state, step, attempt, reason, logPath, outputPath, message) {
   state.steps[step] = { ...state.steps[step], status: "failed", attempt, reason, message, logPath, outputPath };
   touchState(state);
   return summary(state, { status: "failed", currentStep: step, reason, message, logPath, resumeCommand: resumeCommand(state, step) });
+}
+
+function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPath, command, args }) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let interrupted = false;
+    let settled = false;
+    let child;
+    let timeout = null;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ stdout, stderr, timedOut, interrupted, ...result });
+    };
+
+    const markInterrupted = (signal) => {
+      interrupted = true;
+      appendFileSync(logPath, `\n\n[runner] received ${signal}; marking step interrupted\n`);
+      state.status = "interrupted";
+      state.currentStep = step;
+      state.steps[step] = {
+        ...state.steps[step],
+        status: "interrupted",
+        attempt,
+        reason: "runner_interrupted",
+        message: signal,
+        sessionId,
+        logPath,
+        outputPath,
+      };
+      touchState(state);
+      try { child?.kill(signal); } catch {}
+      setTimeout(() => process.exit(signal === "SIGINT" ? 130 : 143), 50).unref?.();
+    };
+
+    const onSigint = () => markInterrupted("SIGINT");
+    const onSigterm = () => markInterrupted("SIGTERM");
+    const cleanup = () => {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      if (timeout) clearTimeout(timeout);
+    };
+
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+
+    try {
+      child = spawn(command, args, { cwd: state.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      finish({ error, status: null, signal: null });
+      return;
+    }
+
+    child.stdout?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      appendFileSync(logPath, text);
+    });
+    child.stderr?.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      appendFileSync(logPath, `\n[stderr] ${text}`);
+    });
+    child.on("error", (error) => finish({ error, status: null, signal: null }));
+    child.on("close", (status, signal) => finish({ status, signal }));
+
+    timeout = state.timeoutMs === 0
+      ? null
+      : setTimeout(() => {
+          timedOut = true;
+          appendFileSync(logPath, `\n\n[runner] timeout after ${state.timeoutMs}ms; terminating child\n`);
+          try { child.kill("SIGTERM"); } catch {}
+          setTimeout(() => {
+            if (!settled) {
+              try { child.kill("SIGKILL"); } catch {}
+            }
+          }, 5000).unref?.();
+        }, state.timeoutMs);
+  });
 }
 
 function normalizeChildResult(value) {
@@ -357,10 +449,11 @@ function summary(state, extra = {}) {
   };
 }
 
-function resumeCommand(state, step, { continueFlag = false } = {}) {
+function resumeCommand(state, step, { continueFlag = false, fresh = false } = {}) {
   const script = process.argv[1];
-  return `node ${shellQuote(script)} resume --run ${shellQuote(relativeOrAbsolute(process.cwd(), state.runDir))} --step ${shellQuote(step)}${continueFlag ? " --continue" : ""} --answer ${shellQuote("<answer>")}`;
+  return `node ${shellQuote(script)} resume --run ${shellQuote(relativeOrAbsolute(process.cwd(), state.runDir))} --step ${shellQuote(step)}${continueFlag ? " --continue" : ""}${fresh ? " --fresh" : ""} --answer ${shellQuote("<answer>")}`;
 }
+
 
 function ensureGitignore(cwd) {
   const path = join(cwd, ".gitignore");
@@ -407,4 +500,6 @@ function printJson(value, exitCode = 0) {
   process.exitCode = exitCode;
 }
 
-main();
+main().catch((error) => {
+  printJson({ status: "failed", reason: "runner_exception", message: error?.message ?? String(error) }, 1);
+});
