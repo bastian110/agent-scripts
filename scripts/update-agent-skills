@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Update the externally sourced agent-skill repositories used by Pi.
+set -euo pipefail
+
+for repo in \
+  "$HOME/Projects/oss/skills" \
+  "$HOME/Projects/oss/taste-skill"; do
+  git -C "$repo" pull --ff-only
+done
