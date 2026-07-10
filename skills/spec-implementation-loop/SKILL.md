@@ -173,7 +173,9 @@ Focus on observable behavior, not implementation steps.
 
 ## Phase 2 — Implement vertical slices
 
-Use `implement` to drive the agreed work and the `tdd` workflow for each behavior, one at a time:
+Use `implement` to drive the agreed work and the `tdd` workflow for each behavior, one at a time.
+
+When the agreed changes include a user-interface modification, load the relevant Taste Skill before changing UI code. Choose it from the interface context: use `design-taste-frontend` for a design-led landing page, portfolio, or redesign; use `redesign-existing-projects` for focused improvements to an existing app or site. Apply it only to the planned UI scope; do not expand the spec.
 
 ```txt
 RED: write one behavior test that fails
