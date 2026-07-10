@@ -389,11 +389,11 @@ function buildPrompt(state, step, { answer } = {}) {
 
   const stepPrompt = {
     "01-spec-intake": `First load /skill:tdd. Ingest the existing spec only; do not generate a new spec. Extract observable behaviors, out-of-scope items, likely public/user-visible surfaces, validations to use, and assumptions. If ambiguity is blocking, return needs_confirmation. If ambiguity is non-blocking, continue and include assumptions in your artifact. Write a markdown or JSON artifact under ${state.runDir}/outputs/. Do not modify application code.`,
-    "02-implementation": `First load /skill:tdd. Implement the behaviors from 01-spec-intake as vertical TDD slices. Modify code/tests as needed. Run relevant validations yourself. Do not review or simplify beyond what is needed to pass the spec.`,
-    "03-review": `First load /skill:review. Review the diff from ${state.base}...HEAD against the provided spec and previous artifacts. Do not modify code. Write findings under ${state.runDir}/outputs/. Return completed even if findings exist; summarize blocking spec findings clearly.`,
+    "02-implementation": `First load /skill:implement, then /skill:tdd. Implement the behaviors from 01-spec-intake as vertical TDD slices. Modify code/tests as needed. Run relevant validations yourself. Do not review or simplify beyond what is needed to pass the spec.`,
+    "03-review": `First load /skill:code-review. Review the diff from ${state.base}...HEAD against the provided spec and previous artifacts. Do not modify code. Write findings under ${state.runDir}/outputs/. Return completed even if findings exist; summarize blocking spec findings clearly.`,
     "04-fix": `First load /skill:tdd. Fix the review findings test-first. Add or adjust behavior tests that expose findings, then fix implementation and run validations. If a finding should be rejected, return needs_confirmation with the reason.`,
     "05-simplification": `First load /skill:codebase-design and /skill:tdd. Simplify the implementation without behavior changes or regressions. Work only while tests are green, make small refactors, and run validations yourself.`,
-    "06-final-review": `First load /skill:review. Run a final review from ${state.base}...HEAD against the same spec. Do not modify code. If blocking findings remain, return needs_confirmation asking whether to run another review-fix cycle; otherwise return completed with final summary.`,
+    "06-final-review": `First load /skill:code-review. Run a final review from ${state.base}...HEAD against the same spec. Do not modify code. If blocking findings remain, return needs_confirmation asking whether to run another review-fix cycle; otherwise return completed with final summary.`,
   }[step];
 
   return `${base}\nStep instructions:\n${stepPrompt}`;

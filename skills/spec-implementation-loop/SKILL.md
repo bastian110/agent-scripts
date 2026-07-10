@@ -5,7 +5,7 @@ description: "Implement a spec through a repeatable loop: clarify behavior, buil
 
 # Spec Implementation Loop
 
-Use this skill to turn a written spec, issue, or PRD into a correct and simple implementation. The loop composes the existing `tdd`, `review`, and `codebase-design` skills.
+Use this skill to turn a written spec, issue, or PRD into a correct and simple implementation. The loop composes the current Matt Pocock `implement`, `tdd`, `code-review`, and `codebase-design` skills.
 
 ## Core rule
 
@@ -142,8 +142,9 @@ and inspect `status`, `currentStep`, `stepStatus`, `logPath`, and `lastLogLines`
 
 When executing this loop, load these skills as needed:
 
+- `implement` to drive implementation from the agreed spec or tickets.
 - `tdd` for behavior-first implementation and test-first fixes.
-- `review` for reviewing changes against the spec and standards.
+- `code-review` for the parallel Standards and Spec review from the agreed fixed point.
 - `codebase-design` before the simplification phase, especially to look for deep module opportunities, shallow pass-through modules, poor seam placement, or testability problems.
 
 ## Phase 1 — Translate spec into behaviors
@@ -172,7 +173,7 @@ Focus on observable behavior, not implementation steps.
 
 ## Phase 2 — Implement vertical slices
 
-Use the `tdd` workflow. For each behavior, one at a time:
+Use `implement` to drive the agreed work and the `tdd` workflow for each behavior, one at a time:
 
 ```txt
 RED: write one behavior test that fails
@@ -192,12 +193,12 @@ After all behaviors are implemented, run the full validation suite.
 
 ## Phase 3 — Review against the spec
 
-Use the `review` skill with the agreed fixed point.
+Use the `code-review` skill with the agreed fixed point.
 
 Review axes:
 
 - **Spec**: missing requirements, partial implementation, incorrect behavior, and scope creep.
-- **Standards**: documented repo conventions only.
+- **Standards**: documented repo conventions plus the skill's Fowler smell baseline; documented conventions override that baseline.
 
 If no spec source can be found, stop and ask the user to provide one. Do not pretend to review against a spec from memory.
 
@@ -261,7 +262,7 @@ After simplification, run full validation.
 
 ## Phase 6 — Final review against the spec
 
-Run the `review` skill again from the same fixed point.
+Run the `code-review` skill again from the same fixed point.
 
 Exit criteria:
 
