@@ -44,6 +44,8 @@ For a Pi parent orchestrator, start in checkpoint mode so the parent regains con
 
 After each checkpoint, the parent should inspect status/logs, then launch the next step with the returned `resumeCommand` or an explicit `resume --step <nextStep>` command.
 
+The runner command waits for its child step. If the parent harness has its own execution watchdog, set that watchdog above the runner timeout. When that cannot be guaranteed, launch the runner inside `tmux` and poll with `status`; do not let a harness hard-kill the runner before it can record its own timeout.
+
 If the runner is unavailable or fails before creating a run, stop and report that. Ask the user whether to continue in manual mode. Do not silently fall back to manual execution.
 
 The manual phases below are the fallback workflow and the conceptual contract for each child Pi step. They are not the default execution path.
@@ -87,11 +89,12 @@ The runner is designed for a Pi parent orchestrator:
 - `03-review` and `04-fix` intentionally share the same `03-review-fix` Pi session so the fix step keeps the review findings and exploration in context while saving tokens.
 - logs are created at step start and streamed while the child Pi runs; parsed child outputs are stored per step and attempt.
 - if the runner is interrupted, it marks the current step `interrupted` when possible.
-- if `resume` sees a `running` step whose log was never created, it reports `stale` and suggests a `--fresh` resume command.
+- every running child records its PID. `status` and `resume` verify that PID; a missing child is reported as `stale` even when its log exists.
+- a stale step must be restarted with `--fresh`; never assume it is still progressing.
 - default mode is `auto`; parent orchestrators should pass `--mode checkpoints` so they can supervise each child step.
 - in checkpoint mode, each invocation runs at most one step and returns `status: "checkpoint"` with `nextStep` and `resumeCommand`.
 - use `status --run <run-dir>` to inspect current state and recent log lines while a child step is running.
-- default timeout is 30 minutes per child Pi; use `--timeout-ms 0` to disable.
+- default timeout is 25 minutes per child Pi, leaving time for a typical 30-minute parent harness to persist the timeout state; use `--timeout-ms 0` only in a persistent shell such as `tmux`.
 - child Pi commands use `--approve` by default; use `--no-approve` to disable.
 
 Status and resume examples:
@@ -136,7 +139,9 @@ A Pi parent orchestrator must not assume the runner is still progressing silentl
 ./scripts/spec-loop status --run .pi/spec-loop-runs/<run-id>
 ```
 
-and inspect `status`, `currentStep`, `stepStatus`, `logPath`, and `lastLogLines`. If status is `checkpoint`, `needs_confirmation`, `failed`, `stale`, or `interrupted`, the parent should report or ask the user before resuming.
+and inspect `status`, `currentStep`, `stepStatus`, `childPid`, `logPath`, and `lastLogLines`. If status is `checkpoint`, `needs_confirmation`, `failed`, `stale`, or `interrupted`, the parent should report or ask the user before resuming.
+
+For `stale`, inspect the log, confirm the child PID is absent, then use the supplied `resumeCommand` with `--fresh`. Never resume a stale attempt in place: it would overwrite its log and hide the interruption.
 
 ## Related skills to load
 

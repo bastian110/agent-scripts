@@ -22,8 +22,10 @@ const SESSION_GROUP = {
   "05-simplification": "05-simplification",
   "06-final-review": "06-final-review",
 };
-const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-const RUNNER_VERSION = 1;
+// Leave room for the parent harness to record the timeout before its own 30-minute watchdog.
+const DEFAULT_TIMEOUT_MS = 25 * 60 * 1000;
+const CHILD_PID_GRACE_MS = 10 * 1000;
+const RUNNER_VERSION = 2;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -124,19 +126,10 @@ async function resume(args) {
 
   const step = args.step || state.currentStep;
   if (!STEPS.includes(step)) return printJson({ status: "failed", reason: "unknown_step", step, steps: STEPS }, 2);
+  const staleReason = markRunningStepStale(state, step);
   const stepState = state.steps[step];
-  if (stepState?.status === "running" && !args.fresh && (!stepState.logPath || !existsSync(stepState.logPath))) {
-    state.status = "stale";
-    state.currentStep = step;
-    state.steps[step] = { ...stepState, status: "stale", reason: "running_step_has_no_log" };
-    touchState(state);
-    return printJson(summary(state, {
-      status: "stale",
-      currentStep: step,
-      reason: "running_step_has_no_log",
-      logPath: stepState.logPath,
-      resumeCommand: resumeCommand(state, step, { fresh: true }),
-    }), 1);
+  if ((staleReason || stepState?.status === "stale") && !args.fresh) {
+    return printJson(staleSummary(state, step, staleReason ?? stepState.reason), 1);
   }
 
   return await runStepAndMaybeContinue(state, step, {
@@ -150,18 +143,68 @@ function status(args) {
   if (!args.run) return printJson({ status: "failed", reason: "missing_run", usage: usage() }, 2);
   const state = readState(resolve(args.run));
   const currentStep = state.currentStep;
+  const staleReason = markRunningStepStale(state, currentStep);
   const stepState = state.steps?.[currentStep];
   const logPath = stepState?.logPath;
-  return printJson(summary(state, {
-    status: state.status,
+  const details = {
+    status: staleReason ? "stale" : state.status,
     currentStep,
     stepStatus: stepState?.status,
     attempt: stepState?.attempt,
     sessionId: stepState?.sessionId,
+    childPid: stepState?.childPid,
+    reason: staleReason ?? stepState?.reason,
     logPath,
     outputPath: stepState?.outputPath,
     lastLogLines: logPath && existsSync(logPath) ? tailLines(logPath, Number.isFinite(args.logLines) ? args.logLines : 40) : [],
-  }), 0);
+  };
+  if (staleReason) details.resumeCommand = resumeCommand(state, currentStep, { fresh: true });
+  return printJson(summary(state, details), 0);
+}
+
+function markRunningStepStale(state, step) {
+  const stepState = state.steps?.[step];
+  if (stepState?.status !== "running") return null;
+
+  let reason = null;
+  if (!stepState.logPath || !existsSync(stepState.logPath)) {
+    reason = "running_step_has_no_log";
+  } else if (Number.isInteger(stepState.childPid) && stepState.childPid > 0) {
+    if (!isProcessAlive(stepState.childPid)) reason = "running_child_not_found";
+  } else {
+    const startedAt = Date.parse(stepState.startedAt ?? "");
+    if (!Number.isFinite(startedAt) || Date.now() - startedAt >= CHILD_PID_GRACE_MS) {
+      reason = "running_child_pid_missing";
+    }
+  }
+
+  if (!reason) return null;
+  state.status = "stale";
+  state.currentStep = step;
+  state.steps[step] = { ...stepState, status: "stale", reason, staleAt: new Date().toISOString() };
+  touchState(state);
+  return reason;
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function staleSummary(state, step, reason) {
+  const stepState = state.steps[step];
+  return summary(state, {
+    status: "stale",
+    currentStep: step,
+    reason,
+    childPid: stepState?.childPid,
+    logPath: stepState?.logPath,
+    resumeCommand: resumeCommand(state, step, { fresh: true }),
+  });
 }
 
 async function runStepAndMaybeContinue(state, step, options = {}) {
@@ -199,9 +242,19 @@ async function runOneStep(state, step, options = {}) {
   const outputPath = join(state.runDir, "outputs", `${step}.attempt-${attempt}.json`);
   const latestPath = join(state.runDir, "outputs", `${step}.latest.json`);
 
+  const startedAt = new Date().toISOString();
   state.status = "running";
   state.currentStep = step;
-  state.steps[step] = { ...stepState, status: "running", attempt, sessionId, logPath, outputPath };
+  state.steps[step] = {
+    ...stepState,
+    status: "running",
+    attempt,
+    sessionId,
+    childPid: null,
+    startedAt,
+    logPath,
+    outputPath,
+  };
   touchState(state);
 
   const prompt = buildPrompt(state, step, { answer: options.answer });
@@ -210,7 +263,6 @@ async function runOneStep(state, step, options = {}) {
   piArgs.push("--session-id", sessionId);
   piArgs.push("-p", prompt);
 
-  const startedAt = new Date().toISOString();
   writeFileSync(logPath, [
     `# ${step} attempt ${attempt}`,
     `status: running`,
@@ -242,6 +294,7 @@ async function runOneStep(state, step, options = {}) {
     logPath,
     outputPath,
     latestPath,
+    childPid: child.childPid ?? state.steps[step]?.childPid ?? null,
     summary: normalized.summary,
     question: normalized.question,
     recommendedAnswer: normalized.recommendedAnswer,
@@ -294,7 +347,7 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
       if (settled) return;
       settled = true;
       cleanup();
-      resolve({ stdout, stderr, timedOut, interrupted, ...result });
+      resolve({ stdout, stderr, timedOut, interrupted, childPid: child?.pid ?? null, ...result });
     };
 
     const markInterrupted = (signal) => {
@@ -330,6 +383,12 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
 
     try {
       child = spawn(command, args, { cwd: state.cwd, stdio: ["ignore", "pipe", "pipe"] });
+      if (!child.pid) {
+        finish({ error: new Error("child process did not expose a PID"), status: null, signal: null });
+        return;
+      }
+      state.steps[step] = { ...state.steps[step], childPid: child.pid };
+      touchState(state);
     } catch (error) {
       finish({ error, status: null, signal: null });
       return;
