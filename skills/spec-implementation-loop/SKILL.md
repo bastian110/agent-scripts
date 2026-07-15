@@ -96,6 +96,7 @@ The runner is designed for a Pi parent orchestrator:
 - use `status --run <run-dir>` to inspect current state and recent log lines while a child step is running.
 - default timeout is 25 minutes per child Pi, leaving time for a typical 30-minute parent harness to persist the timeout state; use `--timeout-ms 0` only in a persistent shell such as `tmux`.
 - child Pi commands use `--approve` by default; use `--no-approve` to disable.
+- each step has a budget of three child attempts per cycle by default; configure it at start with `--max-attempts <n>` (the legacy `--max-retries` alias remains supported).
 
 Status and resume examples:
 
@@ -139,7 +140,19 @@ A Pi parent orchestrator must not assume the runner is still progressing silentl
 ./scripts/spec-loop status --run .pi/spec-loop-runs/<run-id>
 ```
 
-and inspect `status`, `currentStep`, `stepStatus`, `childPid`, `logPath`, and `lastLogLines`. If status is `checkpoint`, `needs_confirmation`, `failed`, `stale`, or `interrupted`, the parent should report or ask the user before resuming.
+and inspect `status`, `currentStep`, `stepStatus`, `childPid`, `attempt`, `reason`, `logPath`, and `lastLogLines`. For `recoverable_error`, follow the recovery protocol below. For `checkpoint`, `needs_confirmation`, `failed`, `stale`, or `interrupted`, the parent should report or ask the user before resuming.
+
+### Recoverable child failures
+
+A child failure that leaves the persisted run valid produces `status: "recoverable_error"`, `recoverable: true`, exit code `0`, the current step and attempt, a distinct stable reason, bounded `stderr`/`diagnostic`, and the full `logPath`. This covers `child_exit_nonzero`, `child_error`, temporary provider errors, `timeout`, `interrupted`, `stale`, `child_json_parse_failed`, `child_result_invalid`, and `child_status_invalid`. Timeouts and interruptions are reported only after the child has stopped; stale recovery always uses a fresh session. The status command exposes the same diagnostic. This is runner-owned output; child Pi JSON must continue using only the three statuses above.
+
+When the runner returns `recoverable_error`, the parent must:
+
+1. Run `status` and verify that the current status is still `recoverable_error` for the same `currentStep`.
+2. Verify that `childPid` is absent or no child process is alive. Never launch concurrent retries.
+3. Execute the returned `resumeCommand` (or `resume --run <run-dir>`). It retries the same step, creates a new session, increments `attempt`, and keeps the working tree untouched.
+4. Let the new child inspect the working tree first and preserve useful changes from the failed attempt.
+5. When the configured attempt budget is exhausted, stop creating child sessions and return `needs_confirmation` with `reason: "retry_limit_reached"`, the consumed/maximum attempt counts, the last log and a recommendation to inspect its diagnostic. Ask the user before using the returned `--confirm` command for a manual attempt. Runner-integrity failures remain terminal and exit non-zero.
 
 For `stale`, inspect the log, confirm the child PID is absent, then use the supplied `resumeCommand` with `--fresh`. Never resume a stale attempt in place: it would overwrite its log and hide the interruption.
 

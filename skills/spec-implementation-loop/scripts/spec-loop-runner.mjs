@@ -32,7 +32,9 @@ const LOCK_FILE = ".resume.lock";
 // Leave room for the parent harness to record the timeout before its own 30-minute watchdog.
 const DEFAULT_TIMEOUT_MS = 25 * 60 * 1000;
 const CHILD_PID_GRACE_MS = 10 * 1000;
-const RUNNER_VERSION = 3;
+const DEFAULT_MAX_ATTEMPTS = 3;
+const MAX_DIAGNOSTIC_LENGTH = 4000;
+const RUNNER_VERSION = 5;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -49,9 +51,9 @@ async function main() {
 
 function usage() {
   return [
-    "spec-loop start --spec <path|url|text> --base <git-ref> [--validation <cmd> ...] [--mode auto|checkpoints]",
-    "spec-loop resume --run <run-dir> [--answer <text>] [--step <step>] [--fresh] [--continue]",
-    "spec-loop status --run <run-dir> [--log-lines <n>]", 
+    "spec-loop start --spec <path|url|text> --base <git-ref> [--validation <cmd> ...] [--mode auto|checkpoints] [--max-attempts <n>]",
+    "spec-loop resume --run <run-dir> [--answer <text>] [--step <step>] [--fresh] [--continue] [--confirm] [--max-attempts <n>]",
+    "spec-loop status --run <run-dir> [--log-lines <n>]",
   ].join("\n");
 }
 
@@ -74,6 +76,9 @@ function parseArgs(argv) {
       case "--mode": args.mode = next(); break;
       case "--run-name": args.runName = next(); break;
       case "--timeout-ms": args.timeoutMs = Number(next()); break;
+      case "--max-attempts": args.maxRecoverableRetries = Number(next()); break;
+      case "--max-retries": args.maxRecoverableRetries = Number(next()); break;
+      case "--max-recoverable-retries": args.maxRecoverableRetries = Number(next()); break;
       case "--pi-bin": args.piBin = next(); break;
       case "--log-lines": args.logLines = Number(next()); break;
       case "--run": args.run = next(); break;
@@ -81,6 +86,7 @@ function parseArgs(argv) {
       case "--step": args.step = next(); break;
       case "--fresh": args.fresh = true; break;
       case "--continue": args.continue = true; break;
+      case "--confirm": args.confirm = true; break;
       case "--no-approve": args.approve = false; break;
       case "--approve": args.approve = true; break;
       default:
@@ -93,6 +99,9 @@ function parseArgs(argv) {
 async function start(args) {
   if (!args.spec) return printJson({ status: "failed", reason: "missing_spec", usage: usage() }, 2);
   if (!args.base) return printJson({ status: "failed", reason: "missing_base", usage: usage() }, 2);
+  if (args.maxRecoverableRetries !== undefined && !isValidRetryLimit(args.maxRecoverableRetries)) {
+    return printJson({ status: "failed", reason: "invalid_max_attempts" }, 2);
+  }
 
   const cwd = process.cwd();
   const runId = `${slugify(projectSlug(cwd))}-${randomUUID().slice(0, 8)}`;
@@ -115,6 +124,11 @@ async function start(args) {
     piBin: args.piBin || process.env.PI_BIN || "pi",
     approve: args.approve !== false,
     timeoutMs: Number.isFinite(args.timeoutMs) ? args.timeoutMs : DEFAULT_TIMEOUT_MS,
+    maxAttempts: args.maxRecoverableRetries ?? DEFAULT_MAX_ATTEMPTS,
+    // Compatibility field for older operators and run directories.
+    maxRecoverableRetries: args.maxRecoverableRetries ?? DEFAULT_MAX_ATTEMPTS,
+    recovery: null,
+    recoverableError: null,
     git: gitSnapshot(cwd),
     cycle: 1,
     activeStep: STEPS[0],
@@ -158,16 +172,136 @@ async function resume(args) {
 async function resumeLocked(args, runDir) {
   const state = readState(runDir);
   if (args.timeoutMs !== undefined) state.timeoutMs = args.timeoutMs;
+  if (args.maxRecoverableRetries !== undefined) {
+    if (!isValidRetryLimit(args.maxRecoverableRetries)) {
+      return printJson({ status: "failed", reason: "invalid_max_attempts" }, 2);
+    }
+    state.maxAttempts = args.maxRecoverableRetries;
+    state.maxRecoverableRetries = args.maxRecoverableRetries;
+  }
   if (args.piBin) state.piBin = args.piBin;
   if (args.approve !== undefined) state.approve = args.approve;
 
   const step = args.step || state.activeStep;
   if (!STEPS.includes(step)) return printJson({ status: "failed", reason: "unknown_step", step, steps: STEPS }, 2);
-  const staleReason = markRunningStepStale(state, step);
-  const stepState = state.steps[step];
-  if ((staleReason || stepState?.status === "stale") && !args.fresh) {
-    return printJson(staleSummary(state, step, staleReason ?? stepState.reason), 1);
+  if (state.status === "failed" && state.reason === "recoverable_retry_limit" && !args.step) {
+    return printJson(summary(state, {
+      status: "failed",
+      currentStep: step,
+      reason: "recoverable_retry_limit",
+      message: "The automatic attempt budget has been exhausted; use an explicit step rewind to try again.",
+      recoverable: false,
+    }), 1);
   }
+  if (state.status === "needs_confirmation" && state.recovery?.awaitingConfirmation) {
+    if (state.recovery.step !== step) {
+      return printJson({
+        ...summary(state, { status: "failed", currentStep: step, recoverable: false }),
+        reason: "confirmation_step_mismatch",
+      }, 1);
+    }
+    if (!args.confirm) {
+      return printJson(summary(state, {
+        status: "needs_confirmation",
+        currentStep: step,
+        reason: state.reason,
+        question: state.steps[step]?.question,
+        recommendedAnswer: state.steps[step]?.recommendedAnswer,
+        resumeCommand: resumeCommand(state, step, { confirm: true }),
+        recoverable: false,
+      }), 0);
+    }
+    state.status = "running";
+    state.reason = null;
+    state.recovery = {
+      ...state.recovery,
+      manual: true,
+      awaitingConfirmation: false,
+    };
+    touchState(state);
+    return await runStepAndMaybeContinue(state, step, {
+      answer: args.answer,
+      fresh: Boolean(args.fresh),
+      retry: true,
+      manual: true,
+      forceContinue: Boolean(args.continue),
+    });
+  }
+
+  let isRecoveryRetry = state.status === "recoverable_error";
+  let staleReason = null;
+  if (!isRecoveryRetry) {
+    staleReason = markRunningStepStale(state, step);
+    const staleState = staleReason || state.status === "stale" || state.steps[step]?.status === "stale";
+    if (staleState) {
+      if (state.status === "failed") {
+        return printJson(summary(state, { status: "failed", currentStep: step, recoverable: false }), 1);
+      }
+      const reason = staleReason ?? state.steps[step]?.reason ?? "stale";
+      if (state.status !== "recoverable_error") recordStaleRecoverable(state, step, reason);
+      staleReason = reason;
+      isRecoveryRetry = true;
+      if (!args.fresh) {
+        return printJson(summary(state, {
+          status: "recoverable_error",
+          currentStep: step,
+          reason,
+          recoverable: true,
+        }), 0);
+      }
+    }
+  }
+
+  if (isRecoveryRetry) {
+    const invalidRecovery = validateRecoveryState(state, step);
+    if (invalidRecovery) {
+      return printJson(failRunnerState(state, step, invalidRecovery), 1);
+    }
+    if (state.recovery.requiresFresh && !args.fresh) {
+      return printJson(summary(state, {
+        status: "recoverable_error",
+        currentStep: step,
+        reason: state.recoverableError?.reason,
+        recoverable: true,
+      }), 0);
+    }
+
+    const activeChild = findLiveChild(state);
+    if (activeChild) {
+      return printJson({
+        ...summary(state, { status: "busy", currentStep: step }),
+        reason: "child_still_running",
+        childPid: activeChild.pid,
+        message: "A child Pi is still running; wait for it before retrying.",
+      }, 1);
+    }
+
+    const recovery = state.recovery;
+    if (recovery.retryCount >= state.maxAttempts - 1
+      || (state.steps[step]?.cycleAttempts ?? 0) >= state.maxAttempts) {
+      return printJson(requestRecoveryConfirmation(state, step), 0);
+    }
+    state.recovery = {
+      ...recovery,
+      retryCount: recovery.retryCount + 1,
+      requiresFresh: false,
+    };
+    state.status = "running";
+    state.reason = null;
+    touchState(state);
+  }
+
+  const activeChild = findLiveChild(state);
+  if (activeChild && activeChild.step !== step) {
+    return printJson({
+      ...summary(state, { status: "busy", currentStep: step }),
+      reason: "child_still_running",
+      childPid: activeChild.pid,
+      message: "Another child Pi is still running; wait for it before starting a step.",
+    }, 1);
+  }
+
+  const stepState = state.steps[step];
   if (stepState?.status === "running" && !staleReason) {
     return printJson({
       ...summary(state, { status: "busy", currentStep: step }),
@@ -178,12 +312,15 @@ async function resumeLocked(args, runDir) {
   }
 
   // An explicit step is an operator-directed rewind. Invalidate every later
-  // step so completed statuses can never survive a manual correction.
-  if (args.step) resetStepsFrom(state, step);
+  // step so completed statuses can never survive a manual correction. A
+  // recoverable retry is deliberately not a rewind: it keeps the working tree
+  // and the current step's attempt history intact.
+  if (args.step && !isRecoveryRetry) resetStepsFrom(state, step);
 
   return await runStepAndMaybeContinue(state, step, {
     answer: args.answer,
     fresh: Boolean(args.fresh),
+    retry: isRecoveryRetry,
     forceContinue: Boolean(args.continue),
   });
 }
@@ -192,11 +329,17 @@ function status(args) {
   if (!args.run) return printJson({ status: "failed", reason: "missing_run", usage: usage() }, 2);
   const state = readState(resolve(args.run));
   const currentStep = state.activeStep;
-  const staleReason = isRunLocked(state.runDir) ? null : markRunningStepStale(state, currentStep);
+  const locked = isRunLocked(state.runDir);
+  let staleReason = locked ? null : markRunningStepStale(state, currentStep);
+  const staleState = state.status === "stale" && state.steps?.[currentStep]?.status === "stale";
+  if (!locked && !staleReason && staleState) {
+    staleReason = state.steps[currentStep].reason ?? "stale";
+    recordStaleRecoverable(state, currentStep, staleReason);
+  }
   const stepState = state.steps?.[currentStep];
   const logPath = stepState?.logPath;
   const details = {
-    status: staleReason ? "stale" : state.status,
+    status: state.status,
     currentStep,
     activeStep: currentStep,
     cycle: state.cycle,
@@ -211,7 +354,6 @@ function status(args) {
     outputPath: stepState?.outputPath,
     lastLogLines: logPath && existsSync(logPath) ? tailLines(logPath, Number.isFinite(args.logLines) ? args.logLines : 40) : [],
   };
-  if (staleReason) details.resumeCommand = resumeCommand(state, currentStep, { fresh: true });
   return printJson(summary(state, details), 0);
 }
 
@@ -232,10 +374,11 @@ function markRunningStepStale(state, step) {
   }
 
   if (!reason) return null;
-  state.status = "stale";
-  setActiveStep(state, step);
-  state.steps[step] = { ...stepState, status: "stale", reason, staleAt: new Date().toISOString() };
-  touchState(state);
+  if (reason === "running_step_has_no_log") {
+    failRunnerState(state, step, reason);
+    return reason;
+  }
+  recordStaleRecoverable(state, step, reason);
   return reason;
 }
 
@@ -246,6 +389,29 @@ function isProcessAlive(pid) {
   } catch (error) {
     return error?.code === "EPERM";
   }
+}
+
+function isValidRetryLimit(value) {
+  return Number.isInteger(value) && value >= 1;
+}
+
+function findLiveChild(state) {
+  for (const [step, stepState] of Object.entries(state.steps ?? {})) {
+    if (!Number.isInteger(stepState?.childPid) || stepState.childPid <= 0) continue;
+    if (!["running", "recoverable_error"].includes(stepState.status)) continue;
+    if (isProcessAlive(stepState.childPid)) return { step, pid: stepState.childPid };
+  }
+  return null;
+}
+
+function validateRecoveryState(state, step) {
+  if (state.activeStep !== step) return "recoverable_step_mismatch";
+  if (state.steps?.[step]?.status !== "recoverable_error") return "recoverable_state_invalid";
+  if (state.recovery?.step !== step) return "recoverable_state_invalid";
+  if (!Number.isInteger(state.recovery.retryCount) || state.recovery.retryCount < 0) {
+    return "recoverable_state_invalid";
+  }
+  return null;
 }
 
 function acquireRunLock(runDir) {
@@ -320,6 +486,7 @@ function resetStepsFrom(state, step) {
       ...previous,
       status: "pending",
       cycle: state.cycle,
+      cycleAttempts: 0,
       childPid: null,
       startedAt: undefined,
       finishedAt: undefined,
@@ -330,6 +497,8 @@ function resetStepsFrom(state, step) {
     };
   }
   state.status = "running";
+  state.recovery = null;
+  state.recoverableError = null;
   setActiveStep(state, step);
   state.reason = state.reason === "blocking_findings" ? state.reason : null;
   touchState(state);
@@ -372,21 +541,6 @@ function transitionAfterCompleted(state, step, result) {
   return { kind: "next", nextStep, blockingFindings: [] };
 }
 
-function staleSummary(state, step, reason) {
-  const stepState = state.steps[step];
-  return summary(state, {
-    status: "stale",
-    currentStep: step,
-    activeStep: step,
-    cycle: state.cycle,
-    reason,
-    findings: state.findings,
-    childPid: stepState?.childPid,
-    logPath: stepState?.logPath,
-    resumeCommand: resumeCommand(state, step, { fresh: true }),
-  });
-}
-
 async function runStepAndMaybeContinue(state, step, options = {}) {
   const result = await runOneStep(state, step, options);
   if (result.status !== "completed") return printJson(result, result.status === "failed" ? 1 : 0);
@@ -413,12 +567,17 @@ async function runStepAndMaybeContinue(state, step, options = {}) {
 
 async function runOneStep(state, step, options = {}) {
   const stepState = state.steps[step] ?? { status: "pending", attempt: 0 };
-  // Every child invocation gets a new attempt so a retry or correction cycle
-  // can never overwrite a previous log or JSON artifact.
-  const attempt = stepState.attempt + 1;
-  const sessionId = `spec-loop-${state.runId}-c${state.cycle}-s${step}-a${attempt}`;
-  const logPath = join(state.runDir, "logs", `${step}.attempt-${attempt}.log`);
-  const outputPath = join(state.runDir, "outputs", `${step}.attempt-${attempt}.json`);
+  // Every child launch gets a new artifact sequence so a retry can never
+  // overwrite a previous log or JSON artifact. The effective attempt counter
+  // is advanced only once spawn has exposed a live child PID.
+  const previousAttempt = Number.isInteger(stepState.attempt) ? stepState.attempt : 0;
+  const launchAttempt = (Number.isInteger(stepState.launchAttempt) ? stepState.launchAttempt : previousAttempt) + 1;
+  const previousCycleAttempts = stepState.cycle === state.cycle && Number.isInteger(stepState.cycleAttempts)
+    ? stepState.cycleAttempts
+    : 0;
+  const sessionId = `spec-loop-${state.runId}-c${state.cycle}-s${step}-a${launchAttempt}`;
+  const logPath = join(state.runDir, "logs", `${step}.attempt-${launchAttempt}.log`);
+  const outputPath = join(state.runDir, "outputs", `${step}.attempt-${launchAttempt}.json`);
   const latestPath = join(state.runDir, "outputs", `${step}.latest.json`);
 
   const startedAt = new Date().toISOString();
@@ -427,7 +586,10 @@ async function runOneStep(state, step, options = {}) {
   state.steps[step] = {
     ...stepState,
     status: "running",
-    attempt,
+    cycle: state.cycle,
+    attempt: previousAttempt,
+    cycleAttempts: previousCycleAttempts,
+    launchAttempt,
     sessionId,
     childPid: null,
     startedAt,
@@ -436,14 +598,18 @@ async function runOneStep(state, step, options = {}) {
   };
   touchState(state);
 
-  const prompt = buildPrompt(state, step, { answer: options.answer });
+  const prompt = buildPrompt(state, step, {
+    answer: options.answer,
+    retry: Boolean(options.retry),
+  });
   const piArgs = [];
   if (state.approve) piArgs.push("--approve");
   piArgs.push("--session-id", sessionId);
   piArgs.push("-p", prompt);
 
   writeFileSync(logPath, [
-    `# ${step} attempt ${attempt}`,
+    `# ${step} launch ${launchAttempt}`,
+    `attempt: ${previousAttempt}`,
     `status: running`,
     `startedAt: ${startedAt}`,
     `sessionId: ${sessionId}`,
@@ -451,23 +617,114 @@ async function runOneStep(state, step, options = {}) {
     "\n## stdout\n",
   ].join("\n"));
 
-  const child = await runChildStreaming({ state, step, attempt, sessionId, logPath, outputPath, command: state.piBin, args: piArgs });
+  const child = await runChildStreaming({ state, step, attempt: launchAttempt, sessionId, logPath, outputPath, command: state.piBin, args: piArgs });
+  const attempt = state.steps[step]?.attempt ?? previousAttempt;
+  const cycleAttempt = state.steps[step]?.cycleAttempts ?? previousCycleAttempts;
   const finishedAt = new Date().toISOString();
   appendFileSync(logPath, `\n\nfinishedAt: ${finishedAt}\nexitCode: ${child.status ?? "null"}\nsignal: ${child.signal ?? "null"}\n`);
 
-  if (child.timedOut) return failStep(state, step, attempt, "timeout", logPath, outputPath);
-  if (child.error) return failStep(state, step, attempt, "child_error", logPath, outputPath, child.error.message);
-  if (child.interrupted) return failStep(state, step, attempt, "interrupted", logPath, outputPath, child.signal || "interrupted");
-  if (child.status !== 0) return failStep(state, step, attempt, "child_exit_nonzero", logPath, outputPath, `exit ${child.status}`);
+  if (child.timedOut) {
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      "timeout",
+      logPath,
+      outputPath,
+      child.stderr,
+      null,
+      null,
+      `Child Pi timed out after ${state.timeoutMs}ms.`,
+    );
+  }
+  if (child.interrupted) {
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      "interrupted",
+      logPath,
+      outputPath,
+      child.stderr,
+      null,
+      child.signal || "interrupted",
+      `Child Pi was interrupted by ${child.signal || "an external signal"}.`,
+    );
+  }
+  if (child.error) {
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      "child_error",
+      logPath,
+      outputPath,
+      child.error.message,
+      null,
+      null,
+      `Child Pi could not be started: ${child.error.message}`,
+    );
+  }
+  if (child.status !== 0) {
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      classifyChildExitReason(child.stderr),
+      logPath,
+      outputPath,
+      child.stderr,
+      child.status,
+      child.signal,
+    );
+  }
 
   const parsed = extractJson(child.stdout || "");
-  if (!parsed) return failStep(state, step, attempt, "child_json_parse_failed", logPath, outputPath);
+  if (!parsed) {
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      "child_json_parse_failed",
+      logPath,
+      outputPath,
+      child.stderr,
+      null,
+      null,
+      "Child Pi output was not valid JSON.",
+    );
+  }
   writeFileSync(outputPath, JSON.stringify(parsed, null, 2));
   copyFileSync(outputPath, latestPath);
 
   const normalized = normalizeChildResult(parsed);
   if (!normalized.valid) {
-    return failStep(state, step, attempt, normalized.reason, logPath, outputPath);
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      normalized.reason,
+      logPath,
+      outputPath,
+      child.stderr,
+      null,
+      null,
+      `Child Pi returned an invalid result: ${normalized.reason}.`,
+    );
+  }
+  if (normalized.status === "failed" && isTemporaryProviderFailure(normalized.reason, normalized.summary)) {
+    return failRecoverableStep(
+      state,
+      step,
+      attempt,
+      "provider_temporary_error",
+      logPath,
+      outputPath,
+      child.stderr,
+      null,
+      null,
+      normalized.summary || "Child Pi reported a temporary provider error.",
+    );
   }
   // Older children used needs_confirmation for a review finding. A final
   // review's blocking facts still trigger the runner-owned correction cycle.
@@ -475,9 +732,13 @@ async function runOneStep(state, step, options = {}) {
     normalized.status = "completed";
   }
 
+  state.recoverableError = null;
+  state.recovery = null;
   state.steps[step] = {
     status: normalized.status,
     attempt,
+    cycleAttempts: cycleAttempt,
+    launchAttempt,
     cycle: state.cycle,
     sessionId,
     logPath,
@@ -542,6 +803,8 @@ async function runOneStep(state, step, options = {}) {
 
 function failStep(state, step, attempt, reason, logPath, outputPath, message) {
   state.status = "failed";
+  state.recoverableError = null;
+  state.recovery = null;
   if (state.reason !== "blocking_findings") state.reason = reason;
   setActiveStep(state, step);
   state.steps[step] = {
@@ -556,7 +819,251 @@ function failStep(state, step, attempt, reason, logPath, outputPath, message) {
     outputPath,
   };
   touchState(state);
-  return summary(state, { status: "failed", currentStep: step, reason, message, logPath, resumeCommand: resumeCommand(state, step) });
+  return summary(state, {
+    status: "failed",
+    currentStep: step,
+    reason,
+    message,
+    logPath,
+    resumeCommand: resumeCommand(state, step),
+  });
+}
+
+function failRecoverableStep(
+  state,
+  step,
+  attempt,
+  reason,
+  logPath,
+  outputPath,
+  stderr,
+  exitCode,
+  signal,
+  message,
+  { requiresFresh = false } = {},
+) {
+  const rawStderr = String(stderr ?? "");
+  const fallback = message ?? `Child Pi exited with code ${exitCode ?? "null"}${signal ? ` (${signal})` : ""}.`;
+  const boundedStderr = boundDiagnostic(rawStderr);
+  const boundedDiagnostic = boundDiagnostic(rawStderr || fallback);
+  const recovery = {
+    ...(state.recovery ?? {
+      step,
+      retryCount: 0,
+      maxRetries: state.maxAttempts,
+      maxAttempts: state.maxAttempts,
+    }),
+    requiresFresh,
+  };
+  const cycleAttempt = state.steps[step]?.cycleAttempts ?? 0;
+  const manualFailure = recovery.manual === true;
+  const exhausted = !manualFailure && (recovery.retryCount >= state.maxAttempts - 1 || cycleAttempt >= state.maxAttempts);
+  const confirmationRequired = manualFailure || exhausted;
+  const resultStatus = confirmationRequired ? "needs_confirmation" : "recoverable_error";
+  const resultReason = exhausted ? "retry_limit_reached" : reason;
+  const question = manualFailure
+    ? "Inspect the last diagnostic and log, then confirm another manual attempt for this step?"
+    : "The automatic attempt budget is exhausted. Inspect the last diagnostic and log, then confirm one manual attempt for this step?";
+  const recommendedAnswer = "I inspected the last diagnostic; confirm one manual attempt.";
+  const command = confirmationRequired
+    ? resumeCommand(state, step, { confirm: true })
+    : resumeCommand(state, step, { fresh: requiresFresh });
+  appendFileSync(logPath, `\n[runner] recoverable reason: ${reason}\n[runner] diagnostic: ${boundedDiagnostic.text}\n`);
+  const result = {
+    status: resultStatus,
+    recoverable: !confirmationRequired,
+    step,
+    currentStep: step,
+    attempt,
+    reason: resultReason,
+    childReason: reason,
+    message: fallback,
+    stderr: boundedStderr.text,
+    diagnostic: boundedDiagnostic.text,
+    diagnosticTruncated: boundedDiagnostic.truncated || boundedStderr.truncated,
+    logPath,
+    fullLogPath: logPath,
+    outputPath,
+    sessionId: state.steps[step]?.sessionId,
+    launchAttempt: state.steps[step]?.launchAttempt,
+    childPid: null,
+    childExitCode: exitCode,
+    signal: signal ?? null,
+    retryCount: recovery.retryCount,
+    cycleAttempt,
+    maxAttempts: state.maxAttempts,
+    maxRecoverableRetries: state.maxAttempts,
+    retriesRemaining: Math.max(0, state.maxAttempts - Math.max(cycleAttempt, recovery.retryCount + 1)),
+    attemptsConsumed: cycleAttempt,
+    attemptLimit: state.maxAttempts,
+    question: confirmationRequired ? question : undefined,
+    recommendedAnswer: confirmationRequired ? recommendedAnswer : undefined,
+    confirmationRequired,
+    exitCode,
+    ...(command ? { resumeCommand: command } : {}),
+  };
+  mkdirSync(join(state.runDir, "outputs"), { recursive: true });
+  writeFileSync(outputPath, JSON.stringify(result, null, 2));
+  copyFileSync(outputPath, join(state.runDir, "outputs", `${step}.latest.json`));
+
+  state.recovery = {
+    ...recovery,
+    manual: false,
+    awaitingConfirmation: confirmationRequired,
+  };
+  state.recoverableError = {
+    ...result,
+    step,
+    reason,
+    recoverable: !confirmationRequired,
+  };
+  state.status = resultStatus;
+  state.reason = resultReason;
+  setActiveStep(state, step);
+  state.steps[step] = {
+    ...state.steps[step],
+    status: resultStatus,
+    attempt,
+    cycleAttempts: cycleAttempt,
+    launchAttempt: state.steps[step]?.launchAttempt,
+    cycle: state.cycle,
+    reason: resultReason,
+    childReason: reason,
+    message: fallback,
+    recoverable: !confirmationRequired,
+    question: confirmationRequired ? question : undefined,
+    recommendedAnswer: confirmationRequired ? recommendedAnswer : undefined,
+    confirmationRequired,
+    diagnostic: boundedDiagnostic.text,
+    stderr: boundedStderr.text,
+    diagnosticTruncated: result.diagnosticTruncated,
+    childExitCode: exitCode,
+    exitCode,
+    signal: signal ?? null,
+    childPid: null,
+    logPath,
+    outputPath,
+    latestPath: join(state.runDir, "outputs", `${step}.latest.json`),
+    finishedAt: new Date().toISOString(),
+  };
+  touchState(state);
+
+  return summary(state, {
+    ...result,
+    status: resultStatus,
+    reason: resultReason,
+    recoverable: !confirmationRequired,
+    question: confirmationRequired ? question : undefined,
+    recommendedAnswer: confirmationRequired ? recommendedAnswer : undefined,
+    confirmationRequired,
+  });
+}
+
+function recordStaleRecoverable(state, step, reason) {
+  const stepState = state.steps[step] ?? { attempt: 1 };
+  const attempt = stepState.attempt || 1;
+  const logPath = stepState.logPath ?? join(state.runDir, "logs", `${step}.attempt-${attempt}.log`);
+  const outputPath = stepState.outputPath ?? join(state.runDir, "outputs", `${step}.attempt-${attempt}.json`);
+  if (!existsSync(logPath)) return failRunnerState(state, step, "running_step_has_no_log");
+  return failRecoverableStep(
+    state,
+    step,
+    attempt,
+    reason,
+    logPath,
+    outputPath,
+    "",
+    null,
+    null,
+    `The child Pi became stale (${reason}).`,
+    { requiresFresh: true },
+  );
+}
+
+function requestRecoveryConfirmation(state, step) {
+  const error = state.recoverableError ?? {};
+  const question = "The automatic attempt budget is exhausted. Inspect the last diagnostic and log, then confirm one manual attempt for this step?";
+  const recommendedAnswer = "I inspected the last diagnostic; confirm one manual attempt.";
+  state.status = "needs_confirmation";
+  state.reason = "retry_limit_reached";
+  state.recoverableError = {
+    ...state.recoverableError,
+    resumeCommand: resumeCommand(state, step, { confirm: true }),
+    recoverable: false,
+  };
+  state.recovery = {
+    ...(state.recovery ?? {
+      step,
+      retryCount: 0,
+      maxRetries: state.maxAttempts,
+      maxAttempts: state.maxAttempts,
+    }),
+    awaitingConfirmation: true,
+    manual: false,
+    requiresFresh: false,
+  };
+  state.steps[step] = {
+    ...state.steps[step],
+    status: "needs_confirmation",
+    reason: "retry_limit_reached",
+    childReason: error.childReason ?? error.reason ?? "child_exit_nonzero",
+    attemptsConsumed: state.steps[step]?.cycleAttempts ?? error.cycleAttempt ?? 0,
+    attemptLimit: state.maxAttempts,
+    question,
+    recommendedAnswer,
+    childPid: null,
+  };
+  touchState(state);
+  return summary(state, {
+    status: "needs_confirmation",
+    currentStep: step,
+    reason: "retry_limit_reached",
+    childReason: error.childReason ?? error.reason ?? "child_exit_nonzero",
+    attemptsConsumed: state.steps[step]?.cycleAttempts ?? error.cycleAttempt ?? 0,
+    attemptLimit: state.maxAttempts,
+    question,
+    recommendedAnswer,
+    resumeCommand: resumeCommand(state, step, { confirm: true }),
+    recoverable: false,
+  });
+}
+
+function failRunnerState(state, step, reason) {
+  state.status = "failed";
+  state.reason = reason;
+  state.steps[step] = {
+    ...state.steps[step],
+    status: "failed",
+    reason,
+    childPid: null,
+  };
+  touchState(state);
+  return summary(state, {
+    status: "failed",
+    currentStep: step,
+    reason,
+    message: "The persisted run state cannot be safely resumed.",
+    recoverable: false,
+  });
+}
+
+function boundDiagnostic(value) {
+  const text = String(value ?? "");
+  if (text.length <= MAX_DIAGNOSTIC_LENGTH) return { text, truncated: false };
+  const suffix = "\n...[truncated; see full log]";
+  return {
+    text: `${text.slice(0, MAX_DIAGNOSTIC_LENGTH - suffix.length)}${suffix}`,
+    truncated: true,
+  };
+}
+
+function classifyChildExitReason(stderr) {
+  return isTemporaryProviderFailure(stderr) ? "provider_temporary_error" : "child_exit_nonzero";
+}
+
+function isTemporaryProviderFailure(...values) {
+  const text = values.map((value) => String(value ?? "")).join(" ").toLowerCase();
+  return /(provider.*temporar|temporar.*provider|429|rate[ -]?limit|too many requests|overloaded|unavailable|upstream|econnreset|etimedout|timeout|service unavailable|\b50[235]\b|\b529\b)/i.test(text);
 }
 
 function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPath, command, args }) {
@@ -568,6 +1075,7 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
     let settled = false;
     let child;
     let timeout = null;
+    let interruptKillTimeout = null;
 
     const finish = (result) => {
       if (settled) return;
@@ -577,15 +1085,17 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
     };
 
     const markInterrupted = (signal) => {
+      if (interrupted) return;
       interrupted = true;
-      appendFileSync(logPath, `\n\n[runner] received ${signal}; marking step interrupted\n`);
+      appendFileSync(logPath, `\n\n[runner] received ${signal}; waiting for child shutdown\n`);
       state.status = "interrupted";
       setActiveStep(state, step);
       state.steps[step] = {
         ...state.steps[step],
         status: "interrupted",
-        attempt,
-        reason: "runner_interrupted",
+        attempt: state.steps[step]?.attempt ?? 0,
+        cycleAttempt: state.steps[step]?.cycleAttempts ?? 0,
+        reason: "interrupted",
         message: signal,
         sessionId,
         logPath,
@@ -593,7 +1103,13 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
       };
       touchState(state);
       try { child?.kill(signal); } catch {}
-      setTimeout(() => process.exit(signal === "SIGINT" ? 130 : 143), 50).unref?.();
+      interruptKillTimeout = setTimeout(() => {
+        if (!settled) {
+          appendFileSync(logPath, "\n[runner] child did not stop after interruption; sending SIGKILL\n");
+          try { child?.kill("SIGKILL"); } catch {}
+        }
+      }, 5000);
+      interruptKillTimeout.unref?.();
     };
 
     const onSigint = () => markInterrupted("SIGINT");
@@ -602,6 +1118,7 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
       if (timeout) clearTimeout(timeout);
+      if (interruptKillTimeout) clearTimeout(interruptKillTimeout);
     };
 
     process.on("SIGINT", onSigint);
@@ -609,12 +1126,22 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
 
     try {
       child = spawn(command, args, { cwd: state.cwd, stdio: ["ignore", "pipe", "pipe"] });
+      child.on("error", (error) => finish({ error, status: null, signal: null }));
+      child.on("close", (status, signal) => finish({ status, signal }));
       if (!child.pid) {
-        finish({ error: new Error("child process did not expose a PID"), status: null, signal: null });
         return;
       }
-      state.steps[step] = { ...state.steps[step], childPid: child.pid };
+      const childState = state.steps[step];
+      state.steps[step] = {
+        ...childState,
+        childPid: child.pid,
+        attempt: (childState.attempt ?? 0) + 1,
+        cycleAttempts: (childState.cycleAttempts ?? 0) + 1,
+      };
       touchState(state);
+      if (interrupted) {
+        try { child.kill("SIGTERM"); } catch {}
+      }
     } catch (error) {
       finish({ error, status: null, signal: null });
       return;
@@ -630,9 +1157,6 @@ function runChildStreaming({ state, step, attempt, sessionId, logPath, outputPat
       stderr += text;
       appendFileSync(logPath, `\n[stderr] ${text}`);
     });
-    child.on("error", (error) => finish({ error, status: null, signal: null }));
-    child.on("close", (status, signal) => finish({ status, signal }));
-
     timeout = state.timeoutMs === 0
       ? null
       : setTimeout(() => {
@@ -693,16 +1217,20 @@ function arrayOrEmpty(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function buildPrompt(state, step, { answer } = {}) {
+function buildPrompt(state, step, { answer, retry = false } = {}) {
   const specBody = specContent(state.spec, state.cwd);
   const previous = previousArtifacts(state, step);
   const handoff = step === "04-fix" && state.cycle > 1 ? correctionHandoff(state) : null;
+  const recoveryHandoff = retry ? recoverableHandoff(state, step) : null;
   const validationsText = state.validations.length
     ? state.validations.map((v) => `"${v}"`).join(", ")
     : "not provided; inspect repo scripts if needed";
   const answerText = answer ? `\nUser/orchestrator answer for this resumed step:\n${answer}\n` : "";
   const handoffText = handoff
     ? `\nCorrection-cycle handoff (machine-readable facts only):\n${JSON.stringify(handoff)}\n`
+    : "";
+  const recoveryText = recoveryHandoff
+    ? `\nAUTOMATIC RECOVERY RETRY:\nThe previous attempt exited unexpectedly after modifying the working tree.\n- Step: ${recoveryHandoff.step}\n- Previous attempt: ${recoveryHandoff.previousAttempt}\n- Failure: ${recoveryHandoff.reason}\n- Error: ${recoveryHandoff.error}\n- Previous log: ${recoveryHandoff.fullLogPath}\n- This is a new Pi session retrying the same step after a recoverable child failure.\n- inspect the current working tree before continuing and understand all existing modifications.\n- Preserve useful modifications from the failed attempt. Do not clean, reset, checkout, restore, or otherwise discard the working tree.\n- Resume the same step from the latest verifiable state. Do not restart the specification from scratch. Do not advance to another step.\nRecovery handoff (machine-readable facts only):\n${JSON.stringify(recoveryHandoff)}\n`
     : "";
   const base = `You are a child Pi agent executing one step of a spec implementation loop.\n\nIMPORTANT OUTPUT CONTRACT:\n- Print exactly one JSON object to stdout and nothing else.\n- Valid statuses: "completed", "needs_confirmation", "failed". Unknown or missing statuses are invalid.\n- A completed result may include findings, blockingFindings, decisions, artifacts, modifiedFiles, and validationResults.\n- For needs_confirmation include: {"status":"needs_confirmation","question":"...","recommendedAnswer":"...","summary":"..."}.\n- For failed include: {"status":"failed","reason":"...","summary":"..."}.\n- Never choose a next step or emit nextAction; the runner owns transitions.\n\nRun context:\n- cwd: ${state.cwd}\n- runDir: ${state.runDir}\n- spec input: ${state.spec}\n- base review ref: ${state.base}\n- validation commands: ${validationsText}\n- cycle: ${state.cycle}\n- active step: ${step}\n${answerText}\nSpec content/reference:\n${specBody}\n\nPrevious step artifacts summary:\n${previous}\n${handoffText}`;
 
@@ -715,7 +1243,28 @@ function buildPrompt(state, step, { answer } = {}) {
     "06-final-review": `First load /skill:code-review. Run a final review from ${state.base}...HEAD against the same spec. Do not modify code. Report all findings and mark blocking ones in blockingFindings (or use findings objects with blocking=true). Do not ask for confirmation merely because blocking findings remain; the runner will schedule a correction cycle. Return completed with a final summary.`
   }[step];
 
-  return `${base}\nStep instructions:\n${stepPrompt}`;
+  return `${base}\nStep instructions:\n${stepPrompt}${recoveryText}`;
+}
+
+function recoverableHandoff(state, step) {
+  const error = state.recoverableError ?? {};
+  return {
+    step,
+    previousAttempt: error.attempt,
+    reason: error.reason,
+    childReason: error.childReason ?? error.reason,
+    diagnostic: error.diagnostic,
+    stderr: error.stderr,
+    error: error.stderr || (error.reason === "child_exit_nonzero"
+      ? "Unknown error (no error details in response)"
+      : error.diagnostic),
+    fullLogPath: error.fullLogPath ?? error.logPath,
+    outputPath: error.outputPath,
+    retryCount: state.recovery?.retryCount ?? 0,
+    cycleAttempt: state.steps?.[step]?.cycleAttempts ?? error.cycleAttempt,
+    maxAttempts: state.maxAttempts,
+    maxRecoverableRetries: state.maxAttempts,
+  };
 }
 
 function specContent(spec, cwd) {
@@ -787,7 +1336,12 @@ function tailLines(path, count) {
 function readState(runDir) {
   const statePath = join(runDir, "state.json");
   if (!existsSync(statePath)) throw new Error(`state.json not found in ${runDir}`);
-  return normalizeState(JSON.parse(readFileSync(statePath, "utf8")));
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  if (state?.version !== undefined
+    && (!Number.isInteger(state.version) || state.version < 0 || state.version > RUNNER_VERSION)) {
+    throw new Error(`incompatible_state_version: ${state?.version}`);
+  }
+  return normalizeState(state);
 }
 
 function normalizeState(state) {
@@ -799,10 +1353,49 @@ function normalizeState(state) {
   state.resumeFrom ??= null;
   state.returnTo ??= null;
   state.reason ??= null;
+  const configuredMaxAttempts = isValidRetryLimit(state.maxAttempts)
+    ? state.maxAttempts
+    : isValidRetryLimit(state.maxRecoverableRetries)
+      ? state.maxRecoverableRetries
+      : DEFAULT_MAX_ATTEMPTS;
+  state.maxAttempts = configuredMaxAttempts;
+  state.maxRecoverableRetries = configuredMaxAttempts;
+  state.recovery = state.recovery && typeof state.recovery === "object"
+    ? state.recovery
+    : null;
+  state.recoverableError = state.recoverableError && typeof state.recoverableError === "object"
+    ? state.recoverableError
+    : null;
+  if (state.recovery) {
+    state.recovery.retryCount = Number.isInteger(state.recovery.retryCount) && state.recovery.retryCount >= 0
+      ? state.recovery.retryCount
+      : 0;
+    state.recovery.maxRetries = isValidRetryLimit(state.recovery.maxRetries)
+      ? state.recovery.maxRetries
+      : state.maxAttempts;
+    state.recovery.maxAttempts = isValidRetryLimit(state.recovery.maxAttempts)
+      ? state.recovery.maxAttempts
+      : state.maxAttempts;
+    state.recovery.requiresFresh = state.recovery.requiresFresh === true;
+    state.recovery.awaitingConfirmation = state.recovery.awaitingConfirmation === true;
+    state.recovery.manual = state.recovery.manual === true;
+  }
   state.findings = Array.isArray(state.findings) ? state.findings : [];
   state.revision = Number.isInteger(state.revision) && state.revision >= 0 ? state.revision : 0;
   state.steps ??= {};
-  for (const step of STEPS) state.steps[step] ??= { status: "pending", attempt: 0 };
+  for (const step of STEPS) {
+    state.steps[step] ??= { status: "pending", attempt: 0 };
+    const stepState = state.steps[step];
+    stepState.attempt = Number.isInteger(stepState.attempt) && stepState.attempt >= 0 ? stepState.attempt : 0;
+    stepState.launchAttempt = Number.isInteger(stepState.launchAttempt) && stepState.launchAttempt >= stepState.attempt
+      ? stepState.launchAttempt
+      : stepState.attempt;
+    stepState.cycleAttempts = Number.isInteger(stepState.cycleAttempts) && stepState.cycleAttempts >= 0
+      ? stepState.cycleAttempts
+      : stepState.status === "pending"
+        ? 0
+        : stepState.attempt;
+  }
   return state;
 }
 
@@ -827,26 +1420,60 @@ function touchState(state) {
 }
 
 function summary(state, extra = {}) {
+  const status = extra.status ?? state.status;
+  const error = state.recoverableError;
+  const isRecoverable = status === "recoverable_error";
   return {
-    status: extra.status ?? state.status,
+    status,
     runDir: relativeOrAbsolute(process.cwd(), state.runDir),
     runId: state.runId,
     currentStep: extra.currentStep ?? state.activeStep,
     activeStep: extra.activeStep ?? extra.currentStep ?? state.activeStep,
+    step: error?.step,
     cycle: state.cycle,
     resumeFrom: state.resumeFrom,
     returnTo: state.returnTo,
     reason: extra.reason ?? state.reason,
     findings: extra.findings ?? state.findings,
+    recoverable: isRecoverable,
+    diagnostic: error?.diagnostic,
+    stderr: error?.stderr,
+    diagnosticTruncated: error?.diagnosticTruncated,
+    logPath: extra.logPath ?? error?.logPath,
+    fullLogPath: error?.fullLogPath ?? error?.logPath,
+    lastLogPath: error?.fullLogPath ?? error?.logPath,
+    childReason: error?.childReason ?? error?.reason,
+    attemptsConsumed: extra.attemptsConsumed ?? state.steps?.[state.activeStep]?.cycleAttempts ?? error?.cycleAttempt,
+    attemptLimit: extra.attemptLimit ?? state.maxAttempts,
+    question: extra.question ?? state.steps?.[state.activeStep]?.question,
+    recommendedAnswer: extra.recommendedAnswer ?? state.steps?.[state.activeStep]?.recommendedAnswer,
+    retryCount: state.recovery?.retryCount ?? error?.retryCount,
+    cycleAttempt: state.steps?.[state.activeStep]?.cycleAttempts ?? error?.cycleAttempt,
+    maxAttempts: state.maxAttempts,
+    maxRecoverableRetries: state.maxAttempts,
+    retriesRemaining: (isRecoverable || (status === "needs_confirmation" && state.recovery?.awaitingConfirmation)) && state.recovery
+      ? Math.max(
+        0,
+        state.maxAttempts - Math.max(
+          state.steps?.[state.activeStep]?.cycleAttempts ?? 0,
+          state.recovery.retryCount + 1,
+        ),
+      )
+      : undefined,
+    resumeCommand: isRecoverable
+      ? error?.resumeCommand ?? resumeCommand(state, state.activeStep)
+      : status === "needs_confirmation" && state.recovery?.awaitingConfirmation
+        ? error?.resumeCommand ?? resumeCommand(state, state.activeStep, { confirm: true })
+        : undefined,
     revision: state.revision,
     ...extra,
     statePath: relativeOrAbsolute(process.cwd(), join(state.runDir, "state.json")),
   };
 }
 
-function resumeCommand(state, step, { continueFlag = false, fresh = false } = {}) {
+function resumeCommand(state, step, { continueFlag = false, fresh = false, confirm = false } = {}) {
   const script = process.argv[1];
-  return `node ${shellQuote(script)} resume --run ${shellQuote(relativeOrAbsolute(process.cwd(), state.runDir))} --step ${shellQuote(step)}${continueFlag ? " --continue" : ""}${fresh ? " --fresh" : ""} --answer ${shellQuote("<answer>")}`;
+  return `node ${shellQuote(script)} resume --run ${shellQuote(relativeOrAbsolute(process.cwd(), state.runDir))} --step ${shellQuote(step)}${continueFlag ? " --continue" : ""}${fresh ? " --fresh" : ""}${confirm ? " --confirm" : ""} --answer ${shellQuote("<answer>")}`;
 }
 
 
