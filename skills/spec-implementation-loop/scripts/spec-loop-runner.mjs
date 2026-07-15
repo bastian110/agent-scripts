@@ -8,6 +8,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -896,7 +897,10 @@ function printJson(value, exitCode = 0) {
 
 export { getBlockingFindings, normalizeChildResult, startCorrectionCycle, transitionAfterCompleted };
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1]
+  && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
   main().catch((error) => {
     printJson({ status: "failed", reason: "runner_exception", message: error?.message ?? String(error) }, 1);
   });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +83,20 @@ const invokeAsync = (args, env = {}) => new Promise((resolve, reject) => {
     }
   });
 });
+
+const testDirectInvocationThroughSymlink = () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), "spec-loop-symlink-test-"));
+  const linkedScriptsDir = join(fixtureDir, "scripts");
+  symlinkSync(scriptDir, linkedScriptsDir, "dir");
+
+  try {
+    const result = spawnSync(join(linkedScriptsDir, "spec-loop"), ["help"], { encoding: "utf8" });
+    assert.equal(result.status, 0);
+    assert.equal(JSON.parse(result.stdout).status, "help");
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+};
 
 const testStaleChild = () => {
   const runDir = createFixture(999_999);
@@ -407,6 +421,7 @@ const testTransitionSeamAndStatusValidation = () => {
   }
 };
 
+testDirectInvocationThroughSymlink();
 testStaleChild();
 testUntrackedStaleChild();
 testLiveChild();
