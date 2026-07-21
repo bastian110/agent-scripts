@@ -1,158 +1,93 @@
 ---
 name: spec-implementation-loop
-description: "Implement a written spec interactively in the current Pi session: clarify observable behavior, build vertical slices, validate, review against the spec and repository standards, fix findings, simplify safely, and run a final review. Use for feature specs, issues, PRDs, and review-fix-review implementation work."
+description: "Implement a written spec through independently launchable general-purpose Pi subagents: clarify behavior, implement vertical slices, review and fix, simplify safely, and run a fresh final review. Use for feature specs, issues, PRDs, and review-fix-review implementation work."
 ---
  
 # Spec Implementation Loop
  
-Implement a written spec correctly, then simplify the result without changing behavior.
- 
-Run the entire workflow interactively in the current Pi session. Do not start child Pi sessions, use an orchestration runner, or persist a workflow state machine.
+Implement a written spec correctly, then simplify without changing behavior. The parent session owns decisions and delegates execution to Pi subagents to preserve its context.
  
 ## Core policy
  
 1. Correctness before simplification.
 2. Observable behavior before implementation details.
-3. One vertical slice at a time.
-4. Never refactor while tests or required validations are failing.
-5. Review the complete workspace change, not only committed changes.
-6. Preserve unrelated user changes and never discard the working tree.
+3. One vertical slice and one active writer at a time.
+4. Never refactor while tests or required validations fail.
+5. Review the complete workspace, including untracked files.
+6. Preserve unrelated user changes; never discard the working tree.
+ 
+## Delegation
+ 
+Load `pi-subagents` and list available agents before launching any. Use the general-purpose `delegate` for every phase and prefer asynchronous runs. Do not create specialized agent definitions: specialize each child at launch with its mission, compact context, and only the skills it needs.
+ 
+```ts
+subagent({
+  agent: "delegate",
+  task: "Mission, context, success criteria, validation, and report expected...",
+  context: "fresh",
+  skill: ["relevant-skill"],
+  async: true,
+})
+```
+ 
+Every phase below is independently launchable. Do not make the workflow depend on an indivisible chain. Give each child a compact handoff containing:
+ 
+- spec source and confirmed behavior plan;
+- review base and initial `git status --short`;
+- scope, exclusions, and accepted assumptions;
+- validation commands;
+- the phase goal, success criteria, and expected report.
+ 
+Pass referenced spec or plan files through the mission or `reads`, and pass selected skills through `skill`; do not expose the whole skill catalog by default. Start each phase in a fresh child session. Preserve continuity only when useful—for example, across implementation slices or review/fix rounds—with `subagent({ action: "resume", id: "...", message: "..." })`; keep only the relevant run ID. Simplification and each final review always get separate fresh sessions. A child must inspect the real workspace and must not launch subagents. Never let the parent or another child edit while a writer is active.
  
 ## 1. Establish the contract
  
-Before changing code, identify:
- 
-- **Spec source**: issue, PRD, Markdown file, ticket, or pasted requirements.
-- **Review base**: normally `main`, `origin/main`, or a commit SHA.
-- **Validation commands**: relevant tests, typecheck, lint, and build.
-- **Scope constraints**: explicitly excluded behavior.
- 
-Verify that the review base resolves. Record the initial `git status --short` so pre-existing changes remain distinguishable from this implementation.
- 
-If the spec or review base is missing, ask for it. If validations are unclear, inspect the repository and propose them.
- 
-Translate the spec into a concise behavior plan:
+The parent identifies the spec source, review base, validations, and exclusions. If the spec or base is missing, ask for it. If validations are unclear, inspect the repository and propose them. Verify the base, record the initial workspace status, and produce:
  
 ```md
 ## Behaviors
 1. ...
-2. ...
- 
 ## Out of scope
 - ...
- 
-## User-visible or public interface
+## Public behavior or interface
 - ...
- 
 ## Validation
 - `...`
- 
 ## Assumptions
 - ...
 ```
  
-Ask the user to confirm the plan before implementation unless they explicitly requested autonomous execution. Ask only about ambiguities that materially affect behavior, scope, data, compatibility, or safety; record reasonable non-blocking assumptions and continue.
+Ask the user to confirm unless autonomous execution was explicitly requested. Ask only about ambiguities that materially affect behavior, scope, compatibility, data, or safety; record reasonable non-blocking assumptions and continue.
  
-## 2. Implement vertical slices
+## 2. Implement
  
-Implement one behavior at a time through the public or user-visible interface.
+Launch a fresh `delegate` as the sole writer, with any implementation skill required by the task. It implements one smallest complete vertical slice at a time through the public or user-visible interface, adds useful behavior or regression tests, and runs the narrowest relevant validation after each slice. Continue only when the slice is green. Resume the same child for later slices when its context remains useful. After all slices, run the full agreed validation suite.
  
-For each behavior:
- 
-1. Add or update a behavior test when it provides useful protection.
-2. For a bug, add a regression test when practical.
-3. Implement the smallest complete change.
-4. Run the narrowest relevant validation.
-5. Continue only when the slice is green.
- 
-Do not add speculative behavior or refactor unrelated code. Load a relevant design skill before planned user-interface work, but do not expand the visual scope beyond the spec.
- 
-After all slices, run the full agreed validation suite.
+Do not add speculative behavior or unrelated refactors. Load a relevant design skill for planned UI work without expanding visual scope.
  
 ## 3. Review and fix
  
-Review the implementation along two separate axes:
+Launch a fresh `delegate` with a review-and-fix mission and permission to edit. It reviews both:
  
-### Spec
+- **Spec:** missing or partial behavior, wrong behavior, specified edge cases, scope creep.
+- **Standards:** repository rules, correctness, error handling, security, compatibility, maintainability, tests coupled to implementation details, duplication, complexity, and module seams.
  
-Check for:
+Its scope is the review base versus the complete workspace: committed, staged, unstaged, and relevant untracked files. It must not rely exclusively on a committed diff. It fixes blocking findings, adds or adjusts useful tests, runs targeted validation, then full validation. Resume this same session and repeat review/fix until no blocking spec finding remains. If rejecting a finding, explain why and ask the user to confirm the tradeoff.
  
-- missing or partial requirements;
-- incorrect observable behavior;
-- unhandled specified edge cases;
-- unintended scope creep.
+A fix is also an independent phase: launch a fresh `delegate` with the contract and accepted findings whenever another phase—especially final review—requests changes. Ask the user before fixes requiring an unapproved product, scope, or architecture decision.
  
-### Standards
+## 4. Simplify
  
-Check the repository instructions and conventions for:
+Only after full validation passes and no blocking spec finding remains, launch a separate fresh `delegate` with `skill: "codebase-design"` when available. It removes unnecessary duplication, branching, pass-throughs, misplaced seams, leaked caller knowledge, and unsupported abstractions.
  
-- correctness and error handling;
-- maintainability and unnecessary complexity;
-- tests coupled to implementation details;
-- duplicated logic or poor module seams;
-- security or compatibility regressions.
- 
-The review scope must include:
- 
-- committed changes since the review base;
-- staged changes;
-- unstaged changes;
-- relevant untracked files.
- 
-Do not rely exclusively on `git diff <base>...HEAD`, because it omits uncommitted implementation work. Compare the review base with the current workspace and inspect `git status --short` for untracked files.
- 
-For each blocking finding:
- 
-1. Add or adjust a test when useful to expose it.
-2. Fix the implementation.
-3. Run targeted validation.
- 
-Then run full validation and repeat the review until no blocking spec finding remains. If a finding should be rejected, explain why and ask the user to confirm the tradeoff.
- 
-## 4. Simplify under green validations
- 
-Enter this phase only when full validation passes and no blocking spec finding remains.
- 
-Load `codebase-design` when available. Look for:
- 
-- removable duplication or branching;
-- shallow pass-through modules;
-- misplaced seams;
-- caller knowledge that can be hidden behind a smaller interface;
-- abstractions unsupported by a real requirement.
- 
-Make one small, behavior-preserving simplification at a time and rerun relevant tests after each change. Prefer deletion and concentration of complexity over additional abstraction. Finish by running the full validation suite.
+Make small behavior-preserving changes, validate each, and finish with full validation. Prefer deletion and concentration of complexity over new abstraction.
  
 ## 5. Final review
  
-Review the same complete workspace against the same spec and review base.
+Launch a separate fresh `delegate` with an explicit read-only final-review mission. It checks the same contract, review base, complete workspace, validations, scope, and simplification result.
  
-Exit only when:
- 
-- all requirements are implemented;
-- no known blocking spec finding remains;
-- no unintended scope creep remains;
-- full validation passes;
-- simplification preserved behavior;
-- accepted tradeoffs are documented.
+If it finds a blocking issue, launch the independent fix phase, validate, then run another fresh final-review session. Exit only when requirements are complete, no blocking spec finding or scope creep remains, full validation passes, simplification preserved behavior, and accepted tradeoffs are documented.
  
 ## Final response
  
-```md
-## Implemented
-- ...
- 
-## Reviewed
-- Spec: ...
-- Base: ...
-- Findings fixed: ...
-- Remaining findings or tradeoffs: ...
- 
-## Simplified
-- ...
- 
-## Validation
-- `command`: pass/fail
-```
- 
-If work stops early, state the phase, the blocker, and the exact decision or input needed from the user.
+Report implemented behavior, review base, findings fixed, simplifications, validation commands and results, remaining tradeoffs, and any residual risk. If work stops early, name the phase, blocker, and exact user decision or input required.
