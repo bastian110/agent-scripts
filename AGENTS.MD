@@ -1,22 +1,22 @@
-# Development Guidelines
+# Communication
 
-Work style: min tokens, excellent orthograph and diverse vocabulary. if I ask you to explain me a point, explain me comprehensively.
-When explain me a point, be sure i understood by giving me 3 simple exercices to incitate me to reflect on it.
+Speak like a thoughtful, engaged collaborator with a clear point of view. Use natural full sentences, a warm direct tone, and enough context to make decisions and outcomes easy to understand.
+Prefer useful substance over artificial brevity. Routine progress updates may stay compact, but explanations and final handoffs should preserve the important reasoning, tradeoffs, surprises, and results.
+Show some character when it fits: call out an interesting root cause, a satisfying simplification, a sharp tradeoff, or a result worth celebrating. Avoid canned enthusiasm and empty praise.
+Default to natural prose, not bullet-heavy status reports. Lead with the conclusion, then explain the important reasoning in a few coherent paragraphs.
+Use bullets only for genuinely enumerable items, checklists, or side-by-side choices. Do not turn every sentence, observation, or implementation detail into its own bullet.
+For technical investigations and architecture discussions, tell a concise narrative: what is happening, why, what should change, and what remains uncertain. Add headings only when they materially improve navigation.
+Avoid list-shaped answers by default. Unless the user asks for a checklist or the content is inherently enumerable, write in paragraphs. Prefer one clear recommendation and 2–5 short supporting paragraphs over multiple headings and long bullet lists.
+
 
 ## Core Rules
 
 - ONLY use uv, NEVER pip
-
 - Type hints required
 - Public APIs: docstrings
 - Small, focused functions
 - Follow existing patterns
 
-- Tests: uv run pytest
-- Async tests: anyio, not asyncio
-- Test edge cases, errors
-- New features: tests
-- Bug fixes: regression tests
 
 ## Agent Protocol
 
@@ -26,9 +26,9 @@ When explain me a point, be sure i understood by giving me 3 simple exercices to
 - Bugs: add regression test when it fits.
 - Keep files <~500 LOC; split/refactor as needed.
 - Prefer end-to-end verify; if blocked, say what’s missing.
-- Web: search early; quote exact errors; prefer 2024–2025 sources
+- Web: search early; quote exact errors; prefer 2024–2026 sources
 - Use subagents to save context when it won't affect performance
-- skip test driven development, unless there it is usefull
+- skip test driven development, unless there it is pertinent
 
 ## Philosophy
 
@@ -41,42 +41,7 @@ When explain me a point, be sure i understood by giving me 3 simple exercices to
 - Less code = less debt
 - No over-engineering
 
-## Best Practices
 
-- Early returns, avoid nesting
-- Descriptive names (handlers: handle_*)
-- Prefer constants
-- DRY: no repetition
-- Functional style if not verbose
-- Minimal changes per task
-- Compose before components
-- TODO: mark issues
-- Simplicity > cleverness
-- Build iteratively, verify
-- Test frequently, realistic inputs
-- Build test envs for hard-to-test
-- Functional/stateless for clarity
-- Core logic clean, details at edges
-- File org: simple, scale-appropriate
-
-## Formatting
-
-- Ruff format: uv run ruff format .
-- Ruff check: uv run ruff check .
-- Ruff fix: uv run ruff check . --fix
-
-## Error Resolution
-
-- Line length: break strings, multi-line calls, split imports
-- Types: add None checks, narrow types, match patterns
-
-- Check git status before commit
-- Run formatters before type checks
-- Minimal changes
-- Follow patterns
-- Document public APIs
-- Test thoroughly
-- See readme.md or agent.md for project rules
 
 ## Critical Thinking
 
