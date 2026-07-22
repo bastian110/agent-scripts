@@ -94,25 +94,6 @@ Read `~/Projects/agent-scripts/tools.md` for the full tool catalog if it exists.
 ### trash
 - Move files to Trash: `trash …` (system command).
 
-### bin/docs-list / scripts/docs-list.ts
-- Optional. Lists `docs/` + enforces front-matter. Ignore if `bin/docs-list` not installed. Rebuild: `bun build scripts/docs-list.ts --compile --outfile bin/docs-list`.
-
-### bin/browser-tools / scripts/browser-tools.ts
-- Chrome DevTools helper. Cmds: `start`, `nav`, `eval`, `screenshot`, `pick`, `cookies`, `inspect`, `kill`.
-- Rebuild: `bun build scripts/browser-tools.ts --compile --target bun --outfile bin/browser-tools`.
-
-### gh
-- GitHub CLI for PRs/CI/releases. Given issue/PR URL (or `/pull/5`): use `gh`, not web search.
-- Examples: `gh issue view <url> --comments -R owner/repo`, `gh pr view <url> --comments --files -R owner/repo`.
-
-### Skills (Claude Code)
-- Skills folder: `~/.claude/skills/`. Check before any task — invoke via `Skill` tool.
-- Per-project skills: `.claude/skills/` in repo root.
-- Always invoke relevant skill before responding; even 1% chance = invoke.
-
-### Slash Commands
-- Global: `~/.codex/prompts/`. Repo-local: `docs/slash-commands/`.
-- Common: `/handoff`, `/pickup`.
 
 ### tg-send (scripts/tg-send)
 - Send a file to Telegram: `tg-send [--caption "text"] <file>`.
