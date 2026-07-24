@@ -7,6 +7,10 @@ description: "Implement a written spec through independently launchable general-
  
 Implement a written spec correctly, then simplify without changing behavior. The parent session owns decisions and delegates execution to Pi subagents to preserve its context.
  
+## Authorization gate
+ 
+This skill may be suggested when it fits, but it must not begin any workflow step, inspect the workspace for the workflow, launch a subagent, or edit files until the user explicitly authorizes using this skill. State the proposed use and wait for a clear affirmative response. A written spec, issue, PRD, or request to implement is not authorization by itself.
+ 
 ## Core policy
  
 1. Correctness before simplification.
